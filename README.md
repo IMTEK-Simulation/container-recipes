@@ -1,15 +1,60 @@
-Singularity recipes
-===================
+Apptainer recipes
+=================
 
-As a general rule, the singularity recipe needs to contains the same version
-of OpenMPI that is running on the target cluster. This required because process
-distribution is orchestrated by the OpenMPI installation that resides on the
-machine, while the code is run via the installation in the container.
-Communication between these instances only works reliably if they have the same
-version.
+Apptainer files can be used to run your code on HPC systems. This makes your
+code run independently from the software stack installed on the computer.
+
+The Apptainer recipe needs to be targeted to the specific HPC system. For
+example, it needs the same version of OpenMPI that is running on the target
+cluster. This required because process distribution is orchestrated by the
+OpenMPI installation that resides on the machine, while the code is run via
+the installation in the container. Communication between these instances only
+works reliably if they have the same version.
 
 _All_ manually compiled code is installed in `/usr/local`. All base container
 contain a simple benchmark in `/opt/mpiBench`.
+
+Container hierarchy
+-------------------
+
+* `MACHINES`: The directory `MACHINES` contains the base containers for each
+platform. For example `MACHINES/NEMO2` contains the base container for NEMO2.
+The base containers have development tools and OpenMPI installed.
+
+* `STACK` (optional): The directory `STACK` contains libaries (the software
+stack) to be compiled after you have build the base container.
+
+* `CODES`: The directory `CODES` contains specific simulation codes, e.g.
+LAMMPS or muSpectre. These codes may require specific libraries.
+
+Software stack
+--------------
+
+To build a functional container, you *always* need a `MACHINE` container and a 
+`CODES` container. You *may* also need specific libraries from the `STACK`
+directory.
+
+Building a single container
+---------------------------
+
+Build a single container with the following command
+
+```bash
+apptainer build -F image.sif recipe.def
+```
+
+This turn the recipe `recipe.def` into the image file `image.sif`. The
+extension `.sif` is an abbreviation for Singularity Image File. *Singularity*
+
+The file `recipe.def` specifies a base image, from which the build starts.
+In the container hierarchy `MACHINES`->`STACK`->`CODES` the subsequent
+container in the hierarchy starts from a build in the previous step.
+
+NEMO2
+-----
+
+
+
 
 NEMO
 ----
