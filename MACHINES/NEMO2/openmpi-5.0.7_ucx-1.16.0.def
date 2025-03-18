@@ -10,13 +10,13 @@ From: ubuntu:24.04
     care of process management and any loaded MPI will collide with the MPI
     installation in the container.) Run the container via
 
-      srun container.sif python_script.py
+      srun --mpi=pmix container.sif python_script.py
 
     in your job submission script.
 
     To run the MPI benchmark, use
 
-      srun apptainer exec container.sif /opt/mpiBench/mpiBench
+      srun --mpi=pmix apptainer exec container.sif /opt/mpiBench/mpiBench
 
     in your job submission script.
 
