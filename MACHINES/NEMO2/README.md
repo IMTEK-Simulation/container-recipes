@@ -18,5 +18,5 @@ echo "PARTITION:  $SLURM_JOB_PARTITION"
 echo "TASKS:      $SLURM_TASKS_PER_NODE tasks/node x $SLURM_JOB_NUM_NODES nodes = $SLURM_NTASKS tasks"
 echo "NODES:      $SLURM_JOB_NODELIST"
 
-srun --mpi=pmi nemo2.sif test.py
+srun --mpi=pmix nemo2.sif test.py
 ```
