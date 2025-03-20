@@ -33,40 +33,25 @@ From: pfft_and_fftw_and_io.sif
     # python3 -m pip install matplotlib
     # apt-get install -y xauth
 
+    # Install Meson
+    pip install --break-system-packages --upgrade meson ninja
+
     # Install muSpectre
     export MUSPECTRE_BUILD_DIR=/tmp/muspectre
     export MUSPECTRE_BRANCH=master
     rm -rf ${MUSPECTRE_BUILD_DIR}
-    git clone -b ${MUSPECTRE_BRANCH} https://gitlab.com/muspectre/muspectre.git ${MUSPECTRE_BUILD_DIR}
+    git clone --recurse-submodules -b ${MUSPECTRE_BRANCH} https://gitlab.com/muspectre/muspectre.git ${MUSPECTRE_BUILD_DIR}
     cd ${MUSPECTRE_BUILD_DIR}
-    python3 -m pip install -r requirements.txt
-    python3 -m pip install NuMPI
-    python3 -m pip install meshio[all]
-    cd build
     # NEMO: -march=sandybridge -mno-avx512f
     # JUWELS: -march=skylake
     # NEMO2: -march=znver4
     # https://www.amd.com/content/dam/amd/en/documents/developer/compiler-options-quick-ref-guide-amd-epyc-9xx4-series-processors.pdf
     export OPT_FLAGS="-O2 -march=znver4"
-    cmake -DCMAKE_VERBOSE_MAKEFILE=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_C_FLAGS_RELEASE="${OPT_FLAGS}" -DCMAKE_CXX_FLAGS_RELEASE="${OPT_FLAGS}" -DMUSPECTRE_MPI_PARALLEL=ON -DMUFFT_USE_FFTWMPI=ON -DMUFFT_USE_PFFT=ON -DNETCDF_IO=ON -DMUSPECTRE_MAKE_TESTS=ON -DBoost_DIR:PATH=/usr/lib/x86_64-linux-gnu/cmake/Boost-1.71.0 -DBoost_INCLUDE_DIR:PATH=/usr/include ..
-    make -j 4
-    make install
+    CPATH=/usr/local/include LIBRARY_PATH=/usr/local/lib CFLAGS=${OPT_FLAGS} CXXFLAGS=${OPT_FLAGS} meson setup --buildtype=release buildDir
+    cd buildDir
+    meson compile
+    meson install
 
 %runscript
 
     python3 "$@"
-
-%test
-    export MUSPECTRE_BUILD_DIR=/tmp/muspectre
-
-    cd /tmp/
-    chown -cR ${USER}:${USER} muspectre/
-    cd ${MUSPECTRE_BUILD_DIR}/build/
-    # the atomatic test is not working properly
-    # ctest --output-on-failure
-
-    # However you can execute the tests manually, where many tests work
-    # (with exception of tests that try to write files)
-    # singularity shell muspectre_fftw_pfft_with_tests.sif
-    # Singularity> cd /tmp/muspectre/build
-    # Singularity> ctest --output-on-failure
