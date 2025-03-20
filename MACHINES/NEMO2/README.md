@@ -3,7 +3,6 @@ NEMO2
 
 *Important:*
 
-* You need to specify `--mpi=pmix`  after srun!
 * You need to specify `--userns` after Apptainers `run` or `exec` command!
 
 An example job submission script looks like this:
@@ -22,7 +21,7 @@ echo "PARTITION:  $SLURM_JOB_PARTITION"
 echo "TASKS:      $SLURM_TASKS_PER_NODE tasks/node x $SLURM_JOB_NUM_NODES nodes = $SLURM_NTASKS tasks"
 echo "NODES:      $SLURM_JOB_NODELIST"
 
-srun --mpi=pmix apptainer exec --userns nemo2.sif /opt/mpiBench/mpiBench
+srun apptainer exec --userns nemo2.sif /opt/mpiBench/mpiBench
 ```
 
 Benchmarks
