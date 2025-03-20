@@ -1,5 +1,5 @@
 Bootstrap: localimage
-From: pfft_and_fftw_and_io.sif
+From: netcdf_fftw_pfft.sif
 
 %post
 
@@ -34,7 +34,7 @@ From: pfft_and_fftw_and_io.sif
     # apt-get install -y xauth
 
     # Install Meson
-    pip install --break-system-packages --upgrade meson ninja
+    pip install --break-system-packages --upgrade meson ninja meson-python patchelf
 
     # Install muSpectre
     export MUSPECTRE_BUILD_DIR=/tmp/muspectre
@@ -47,10 +47,7 @@ From: pfft_and_fftw_and_io.sif
     # NEMO2: -march=znver4
     # https://www.amd.com/content/dam/amd/en/documents/developer/compiler-options-quick-ref-guide-amd-epyc-9xx4-series-processors.pdf
     export OPT_FLAGS="-O2 -march=znver4"
-    CPATH=/usr/local/include LIBRARY_PATH=/usr/local/lib CFLAGS=${OPT_FLAGS} CXXFLAGS=${OPT_FLAGS} meson setup --buildtype=release buildDir
-    cd buildDir
-    meson compile
-    meson install
+    CPATH=/usr/local/include LIBRARY_PATH=/usr/local/lib CFLAGS=${OPT_FLAGS} CXXFLAGS=${OPT_FLAGS} pip install -vvv --break-system-packages --no-build-isolation .
 
 %runscript
 
