@@ -10,13 +10,13 @@ From: ubuntu:24.04
     care of process management and any loaded MPI will collide with the MPI
     installation in the container.) Run the container via
 
-      srun --mpi=pmix container.sif python_script.py
+      srun container.sif python_script.py
 
     in your job submission script.
 
     To run the MPI benchmark, use
 
-      srun --mpi=pmix apptainer exec container.sif /opt/mpiBench/mpiBench
+      srun apptainer exec container.sif /opt/mpiBench/mpiBench
 
     in your job submission script.
 
@@ -70,7 +70,7 @@ From: ubuntu:24.04
     # Download, compile and install MUNGE
     rm -rf /tmp/munge-${CONTAINER_MUNGE_VERSION}
     curl -L https://github.com/dun/munge/releases/download/munge-${CONTAINER_MUNGE_VERSION}/munge-${CONTAINER_MUNGE_VERSION}.tar.xz | tar -xJC /tmp --no-same-owner
-    cd /tmp/munge-munge-${CONTAINER_MUNGE_VERSION}
+    cd /tmp/munge-${CONTAINER_MUNGE_VERSION}
     ./configure --prefix=/usr/local
     make -j 4
     make install
