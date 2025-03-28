@@ -42,6 +42,12 @@ From: openmpi-4.0.2_psm2-11.2.185.sif
     cd $LAMMPS_DIR/lammps/src/ 
     make yes-NETCDF
     make yes-MANYBODY 
+    make yes-MOLECULE
+    make yes-KSPACE
+    make yes-MANIFOLD
+    make yes-MANYBODY
+    make yes-OPENMP
+    make yes-OPT
     make mode=shlib mpi 
 
 %environment
