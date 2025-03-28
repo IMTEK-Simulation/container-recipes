@@ -7,9 +7,9 @@ An example job submission script looks like this:
 #!/bin/bash
 #SBATCH --job-name=mpiBench
 #SBATCH --nodes=2
-#SBATCH --ntasks-per-node=64
+#SBATCH --ntasks-per-node=190
 #SBATCH --time=00:14:00
-#SBATCH --mem-per-cpu=1gb
+#SBATCH --mem-per-cpu=3gb
 
 echo "ID/NAME:    $SLURM_JOB_ID / $SLURM_JOB_NAME"
 echo "USER:       $SLURM_JOB_USER"
