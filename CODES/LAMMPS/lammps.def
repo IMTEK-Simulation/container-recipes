@@ -1,0 +1,48 @@
+Bootstrap: localimage
+From: netcdf_fftw_pfft.sif
+
+%post
+    apt-get install -y libjpeg-dev libpng-dev
+
+    # Paths to the compiled netcdf, pnetcdf file
+    BUILDDIR=/tmp
+    PREFIX=/usr/local
+
+    export CONTAINER_LAMMPS_VERSION=stable_29Aug2024_update2
+
+    # NEMO: -march=sandybridge -mno-avx512f
+    # JUWELS: -march=skylake
+    # NEMO2: -march=znver4
+    # https://www.amd.com/content/dam/amd/en/documents/developer/compiler-options-quick-ref-guide-amd-epyc-9xx4-series-processors.pdf
+    OPT_FLAGS="-march=znver4"
+
+    # Install LAMMPS
+    rm -rf ${BUILDDIR}/lammps
+    git clone -b ${CONTAINER_LAMMPS_VERSION} https://github.com/lammps/lammps.git ${BUILDDIR}/lammps
+    rm -rf ${BUILDDIR}/lammps-build
+    mkdir ${BUILDDIR}/lammps-build
+    cd ${BUILDDIR}/lammps-build
+    cmake \
+        -DCMAKE_INSTALL_PREFIX=${PREFIX} \
+        -DCMAKE_TUNE_FLAGS="${OPT_FLAGS}" \
+        -DBUILD_MPI=on \
+        -DBUILD_OMP=off \
+        -DPKG_KSPACE=on \
+        -DPKG_MANYBODY=on \
+        -DPKG_MISC=on \
+        -DPKG_ML-PACE=on \
+        -DPKG_MANIFOLD=on \
+        -DPKG_MOLECULE=on \
+        -DPKG_MOLFILE=on \
+        -DPKG_NETCDF=on \
+        -DPKG_OPT=on \
+        -DPKG_RIGID=on \
+        -DPKG_VORONOI=on \
+        -DWITH_JPEG=on \
+        -DWITH_PNG=on \
+        ${BUILDDIR}/lammps/cmake
+    make -j 4
+    make install
+
+%runscript 
+    /usr/local/bin/lmp "$@"
