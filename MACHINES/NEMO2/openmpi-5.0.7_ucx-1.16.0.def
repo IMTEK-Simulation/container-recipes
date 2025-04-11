@@ -130,11 +130,6 @@ From: ubuntu:24.04
     make -j 4
     make install
 
-    # Set OpenMPI configuration (this needs to be indented to the left!!!)
-cat <<EOF > /usr/local/etc/openmpi-mca-params.conf
-io = romio321
-EOF
-
     # Install mpi4py
     python3 -m pip install --break-system-packages --no-binary mpi4py mpi4py==${CONTAINER_MPI4PY_VERSION}
 
@@ -143,6 +138,11 @@ EOF
     git clone https://github.com/LLNL/mpiBench.git
     cd mpiBench
     make
+
+    # Fetch and compile MPI I/O benchmark
+    curl -L https://fs.hlrs.de/projects/par/mpi/b_eff_io/b_eff_io_v2.1.tar.gz | tar -xzC /opt
+    cd /opt/b_eff_io
+    mpicc -o b_eff_io b_eff_io.c -lm
 
 %environment
 

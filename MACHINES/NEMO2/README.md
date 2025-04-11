@@ -20,8 +20,10 @@ echo "NODES:      $SLURM_JOB_NODELIST"
 srun apptainer exec nemo2.sif /opt/mpiBench/mpiBench
 ```
 
-Benchmarks
-----------
+Throughput Benchmarks
+---------------------
+
+The container contains the [LLNL MPI benchmark suite](https://github.com/LLNL/mpiBench).
 
 * 1 node, 64 tasks per node:
 ```
@@ -137,4 +139,26 @@ Alltoall   ppn      64
      64K       119.946
     128K        72.740
     256K       236.320
+```
 
+I/O Benchmarks
+--------------
+
+The container contains the [HRLS MPI I/O benchmarks](https://fs.hlrs.de/projects/par/mpi/b_eff_io/):
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=mpiBench
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=190
+#SBATCH --time=00:14:00
+#SBATCH --mem-per-cpu=2gb
+
+echo "ID/NAME:    $SLURM_JOB_ID / $SLURM_JOB_NAME"
+echo "USER:       $SLURM_JOB_USER"
+echo "PARTITION:  $SLURM_JOB_PARTITION"
+echo "TASKS:      $SLURM_TASKS_PER_NODE tasks/node x $SLURM_JOB_NUM_NODES nodes = $SLURM_NTASKS tasks"
+echo "NODES:      $SLURM_JOB_NODELIST"
+
+srun apptainer exec nemo2.sif /opt/b_eff_io/b_eff_io -MB 2048 -MT 389120 -noshared -rewrite -N $SLURM_NTASKS -T 60 -p /MY_fast_filesystem/MY_directory -f b_eff_io_$SLURM_NTASKS
+```
