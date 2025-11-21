@@ -1,0 +1,70 @@
+Bootstrap: localimage
+From: netcdf_fftw_pfft.sif
+
+%help
+
+    This container contains muFFT. You can download an example Python script
+    from
+
+        wget https://raw.githubusercontent.com/muSpectre/muFFT/refs/heads/main/examples/parallel.py
+
+    Run the code with
+
+        srun apptainer run mufft.sif parallel.py
+
+%post
+
+    if [ -e /usr/share/modulefiles ]; then
+        export MODULEPATH=/usr/share/modulefiles
+        source /usr/share/lmod/lmod/init/bash
+        module load mpi
+    fi
+
+    # Set environment variable to contain /usr/local
+    export PATH=/usr/local/bin:$PATH
+    export LD_RUN_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+    export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+    export MANPATH=/usr/local/share/man:$MANPATH
+
+    # For apt to be noninteractive
+    export DEBIAN_FRONTEND=noninteractive
+    export DEBCONF_NONINTERACTIVE_SEEN=true
+
+    if $(command -v dnf); then
+        # We are on RedHat
+        dnf install -y boost-devel
+    else
+        # We are on Debian
+        apt-get install -y libboost-test-dev
+    fi
+
+    # additional stuff for plotting with image
+    # apt-get install -y python3-tk
+    # python3 -m pip install matplotlib
+    # apt-get install -y xauth
+
+    # Install Meson
+    # pip install --break-system-packages --upgrade meson ninja meson-python patchelf
+
+    # Install muSpectre
+    # export MUFFT_BUILD_DIR=/tmp/muspectre
+    # export MUFFT_BRANCH=main
+    # rm -rf ${MUFFT_BUILD_DIR}
+    # git clone --recurse-submodules -b ${MUFFT_BRANCH} https://github.com/muSpectre/muFFT ${MUFFT_BUILD_DIR}
+    # cd ${MUFFT_BUILD_DIR}
+    # NEMO: -march=sandybridge -mno-avx512f
+    # JUWELS: -march=skylake
+    # NEMO2: -march=znver4
+    # https://www.amd.com/content/dam/amd/en/documents/developer/compiler-options-quick-ref-guide-amd-epyc-9xx4-series-processors.pdf
+    # export OPT_FLAGS="-O2 -march=znver4"
+    # CPATH=/usr/local/include LIBRARY_PATH=/usr/local/lib CFLAGS=${OPT_FLAGS} CXXFLAGS=${OPT_FLAGS}
+    # meson setup -D pfft=disabled builddir
+    # cd builddir
+    # meson compile
+    # meson install 
+    pip install -vvv -Csetup-args="-Dpfft=disabled" --break-system-packages git+https://github.com/muSpectre/muFFT
+
+%runscript
+
+    python3 "$@"

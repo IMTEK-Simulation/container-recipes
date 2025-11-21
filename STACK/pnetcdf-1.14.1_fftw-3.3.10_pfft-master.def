@@ -1,0 +1,99 @@
+Bootstrap: localimage
+From: mpibase.sif
+
+%post
+     
+    # For compiling we need to load Fedora's MPI module
+    # (if the base image is based on Fedora)   
+    if [ -e /usr/share/modulefiles ]; then
+        export MODULEPATH=/usr/share/modulefiles
+        source /usr/share/lmod/lmod/init/bash
+        module load mpi
+    fi
+
+    export PATH=/usr/local/bin:$PATH
+    export LD_RUN_PATH=/usr/local/lib:$LD_RUN_PATH
+    export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+    export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+    export MANPATH=/usr/local/share/man:$MANPATH
+
+    export CONTAINER_FFTW_VERSION=3.3.10
+    export CONTAINER_HDF5_VERSION=1.14.6
+    export CONTAINER_PNETCDF_VERSION=1.14.1
+    export CONTAINER_NETCDF4_VERSION=4.9.3
+    export CONTAINER_NETCDF4_PYTHON_VERSION=1.7.3
+
+    if $(command -v dnf); then
+        # We are on RedHat
+        dnf install -y cmake libcurl-devel m4
+    else
+        # We are on Debian
+        export DEBIAN_FRONTEND=noninteractive
+        export DEBCONF_NONINTERACTIVE_SEEN=true 
+
+        apt-get -qq update
+        apt-get -y -qq install \
+            cmake \
+            libcurl4-openssl-dev \
+            m4 \
+            libtool \
+            automake
+    fi
+
+    python3 -m pip install --break-system-packages --upgrade setuptools numpy scipy pytest
+
+    BUILDDIR=/tmp 
+    PREFIX=/usr/local
+
+    # Manual install of MPI parallel FFTW
+    rm -rf ${BUILDDIR}/fftw-${CONTAINER_FFTW_VERSION}
+    curl -L http://www.fftw.org/fftw-${CONTAINER_FFTW_VERSION}.tar.gz | tar -xzC ${BUILDDIR}
+    cd ${BUILDDIR}/fftw-${CONTAINER_FFTW_VERSION}
+    ./configure --enable-shared --enable-mpi --disable-fortran --enable-sse2 --enable-avx --enable-avx2 --prefix=${PREFIX}
+    make -j 4
+    make install
+
+    # Install current master of PFFT
+    rm -rf ${BUILDDIR}/pfft
+    git clone https://github.com/mpip/pfft.git ${BUILDDIR}/pfft
+    cd ${BUILDDIR}/pfft
+    ./bootstrap.sh
+    CFLAGS="-O3 -march=sandybridge -mno-avx512f" ./configure --disable-fortran --enable-shared --prefix=/usr/local
+    make -j 4
+    make install 
+
+    # Install parallel version of the NetCDF library from the sources.
+    # This is necessary because parallel compiles (if existing) are
+    # broken on most distributions.
+    rm -rf ${BUILDDIR}/pnetcdf-${CONTAINER_PNETCDF_VERSION}
+    curl -L https://parallel-netcdf.github.io/Release/pnetcdf-${CONTAINER_PNETCDF_VERSION}.tar.gz | tar -xzC ${BUILDDIR}
+    cd ${BUILDDIR}/pnetcdf-${CONTAINER_PNETCDF_VERSION}
+    ./configure --disable-fortran --disable-cxx --enable-shared --prefix=${PREFIX}
+    make -j 4
+    make install
+
+    rm -rf ${BUILDDIR}/hdf5-${CONTAINER_HDF5_VERSION}
+    curl -L https://github.com/HDFGroup/hdf5/releases/download/hdf5_${CONTAINER_HDF5_VERSION}/hdf5-${CONTAINER_HDF5_VERSION}.tar.gz | tar -xzC ${BUILDDIR}
+    cd ${BUILDDIR}/hdf5-${CONTAINER_HDF5_VERSION}
+    ./configure --enable-parallel --prefix=${PREFIX}
+    make -j 4
+    make install
+
+    # We need to compile NetCDF ourselves because there is no package that has
+    # parallel PnetCDF and HDF5 enabled.
+    rm -rf ${BUILDDIR}/netcdf-c-build
+    curl -L https://downloads.unidata.ucar.edu/netcdf-c/${CONTAINER_NETCDF4_VERSION}/netcdf-c-${CONTAINER_NETCDF4_VERSION}.tar.gz | tar -xzC ${BUILDDIR}
+    mkdir -p ${BUILDDIR}/netcdf-c-build
+    cd ${BUILDDIR}/netcdf-c-build
+    cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${PREFIX} -DUSE_PARALLEL=ON -DENABLE_PARALLEL4=ON -DENABLE_PNETCDF=ON -DENABLE_TESTS=OFF ${BUILDDIR}/netcdf-c-${CONTAINER_NETCDF4_VERSION}
+    make -j 4
+    make install
+
+    # Install netcdf4-python and make sure that it is compiled (no-binary),
+    # otherwise it will not have parallel support.
+    python3 -m pip install --break-system-packages --upgrade cython
+    NETCDF4_DIR=${PREFIX} HDF5_DIR=${PREFIX} python3 -m pip install --break-system-packages --no-build-isolation --upgrade --no-binary netCDF4 netCDF4==${CONTAINER_NETCDF4_PYTHON_VERSION}
+
+%runscript
+
+    python3 "$@" 
