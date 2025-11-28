@@ -1,0 +1,58 @@
+Bootstrap: localimage
+From: mpibase.sif
+
+%files
+
+    CASTEP-25.12.tar.gz /opt
+
+%post
+
+    export CASTEP_VERSION=25.12
+    export LIBXC_VERSION=7.0.0
+    export AOCC_VERSION=5.0.0
+
+    # Install dependencies
+    apt-get install cmake libopenblas-dev libncurses5-dev -y
+
+    # Install Python dependencies
+    python3 -m pip install --upgrade --break-system-packages numpy scipy ase
+
+    # Get AMD compiler
+    # cd ${SINGULARITY_ROOTFS}/tmp
+    # wget https://download.amd.com/developer/eula/aocc/aocc-5-0/aocc-compiler-${AOCC_VERSION}_1_amd64.deb
+    # dpkg -i aocc-compiler-${AOCC_VERSION}_1_amd64.deb
+    # rm aocc-compiler-${AOCC_VERSION}_1_amd64.deb*
+
+    # Configure AOCC environment
+    # . /opt/AMD/aocc-compiler-${AOCC_VERSION}/setenv_AOCC.sh
+
+    # Get and build libxc
+    cd ${SINGULARITY_ROOTFS}/tmp
+    wget https://gitlab.com/libxc/libxc/-/archive/${LIBXC_VERSION}/libxc-${LIBXC_VERSION}.tar.bz2
+    tar -jxf libxc-${LIBXC_VERSION}.tar.bz2
+    mkdir -p ${SINGULARITY_ROOTFS}/tmp/libxc-build
+    cmake -S ${SINGULARITY_ROOTFS}/tmp/libxc-${LIBXC_VERSION} -B ${SINGULARITY_ROOTFS}/tmp/libxc-build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DENABLE_FORTRAN=ON
+    cd ${SINGULARITY_ROOTFS}/tmp/libxc-build && make -j 8 && make install
+    rm -rf ${SINGULARITY_ROOTFS}/tmp/libxc-*
+
+    # Build and install CASTEP
+    cd ${SINGULARITY_ROOTFS}/tmp
+    tar -xzf ${SINGULARITY_ROOTFS}/opt/CASTEP-${CASTEP_VERSION}.tar.gz
+    rm ${SINGULARITY_ROOTFS}/opt/CASTEP-${CASTEP_VERSION}.tar.gz
+    mkdir -p ${SINGULARITY_ROOTFS}/tmp/CASTEP-build
+    cmake -S ${SINGULARITY_ROOTFS}/tmp/CASTEP-${CASTEP_VERSION} -B ${SINGULARITY_ROOTFS}/tmp/CASTEP-build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local
+    cd ${SINGULARITY_ROOTFS}/tmp/CASTEP-build && make -j 8 && make install
+    rm -rf ${SINGULARITY_ROOTFS}/tmp/CASTEP-*
+
+%environment
+
+    export CASTEP_COMMAND='/usr/local/bin/castep.mpi'
+
+%runscript
+
+    /usr/local/bin/castep.mpi "$@"
