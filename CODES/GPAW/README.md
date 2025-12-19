@@ -2,7 +2,7 @@
 
 ## Docker
 
-This directory contains a Docker recipe that builds [GPAW](https://wiki.fysik.dtu.dk/gpaw/) with the Intel HPC (legacy) compiler suite. The Docker recipe uses a two stage build to minimize the image size. It compiles both the Python interface and the standalone code.
+This directory contains a Docker recipe that builds [GPAW](https://wiki.fysik.dtu.dk/gpaw/) 25.7.0 with the Intel oneAPI HPC Toolkit. It uses libxc 7.0.0 and ASE 3.26.0.
 
 Build the Docker image with:
 ```bash
@@ -11,19 +11,31 @@ docker build -t gpaw .
 
 The image is on Docker Hub [here](https://hub.docker.com/repository/docker/pastewka/gpaw).
 
-## Singularity
+## Apptainer
 
-The Docker images can be converted into a Singularity image for use on HPC systems. Convert the image with:
+The Docker images can be converted into an Apptainer image for use on HPC systems. Convert the image with:
 ```bash
-sudo singularity build gpaw.sif docker-daemon://gpaw:latest
+apptainer build gpaw.sif docker-daemon://gpaw:latest
 ```
 
 ## Docker Hub
 
 The image is also available on [Docker Hub](https://hub.docker.com). To get it from there, execute:
 ```bash
-docker pull pastewka/gpaw:210817
-sudo singularity build gpaw.sif docker-daemon://pastewka/gpaw:210817
+docker pull pastewka/gpaw
+apptainer build gpaw.sif docker-daemon://pastewka/gpaw:latest
+```
+
+## Example
+
+The file `diamond.py` contains a simple example that computes the energy of a 2x2x2 supercell of cubic diamond. Run it with:
+```bash
+apptainer run gpaw.sif gpaw python diamond.py
+```
+
+Or for parallel execution:
+```bash
+apptainer run gpaw.sif mpirun -np 4 gpaw python diamond.py
 ```
 
 ## Troubleshooting
@@ -45,5 +57,5 @@ OMP: System error #2: No such file or directory
 ```
 you need to bind `/run/shm` into the container. Try executing:
 ```
-OMP_NUM_THREADS=4 singularity run --bind /run/shm:/run/shm dftb.sif mdcore-1.0.1
+OMP_NUM_THREADS=4 apptainer run --bind /run/shm:/run/shm gpaw.sif gpaw python script.py
 ```

@@ -27,6 +27,9 @@ RUN mkdir build && cd build \
     && make test \
     && make install
 
+# Add /usr/local/lib to library path for libxc
+ENV LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH}"
+
 # Install GPAW - Python module and standalone code
 # ASE 3.26.0 belongs to GPAW 25.7.0 - see https://wiki.fysik.dtu.dk/gpaw/releasenotes.html
 ENV ASE_VERSION=3.26.0
