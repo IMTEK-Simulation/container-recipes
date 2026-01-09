@@ -4,7 +4,7 @@ From: ubuntu:24.04
 %help
 
     This is the base container for running containerized and MPI parallel on
-    NEMO2.
+    NEMO2 with CUDA support for NVIDIA H200 GPUs.
 
     When running on NEMO2, *do not* load any MPI environment. (Slurm takes
     care of process management and any loaded MPI will collide with the MPI
@@ -16,13 +16,19 @@ From: ubuntu:24.04
 
     To run the MPI benchmark, use
 
-      srun apptainer exec container.sif /opt/mpiBench/mpiBench
+      srun apptainer exec --nv container.sif /opt/mpiBench/mpiBench
 
     in your job submission script.
 
-%post
+    For GPU-aware MPI, ensure you use the UCX transport:
 
-    export AOCC_VERSION=5.0.0
+      export OMPI_MCA_pml=ucx
+
+    To compile CUDA code with MPI, use nvcc or set:
+
+      export OMPI_CXX=nvcc
+
+%post
 
     export CONTAINER_HWLOC_VERSION=2.10.0  # like NEMO2
     export CONTAINER_LIBEVENT_VERSION=2.1.12  # like NEMO2
@@ -34,7 +40,15 @@ From: ubuntu:24.04
     export CONTAINER_PMIX_VERSION=5.0.2  # like NEMO2
     export CONTAINER_PRRTE_VERSION=3.0.5  # like NEMO2
     export CONTAINER_OMPI_VERSION=5.0.7
-    export CONTAINER_MPI4PY_VERSION=4.0.3 
+    export CONTAINER_MPI4PY_VERSION=4.0.3
+    export CONTAINER_CUDA_VERSION=12-6
+
+    # Optimization flags for AMD EPYC 9654 (Zen 4 / Genoa)
+    # https://www.amd.com/content/dam/amd/en/documents/developer/compiler-options-quick-ref-guide-amd-epyc-9xx4-series-processors.pdf
+    export OPT_FLAGS="-O3 -march=znver4"
+    export CFLAGS="$OPT_FLAGS"
+    export CXXFLAGS="$OPT_FLAGS"
+    export FCFLAGS="$OPT_FLAGS"
 
     # Set environment variable to contain /usr/local
     export PATH=/usr/local/bin:$PATH
@@ -47,43 +61,57 @@ From: ubuntu:24.04
     export DEBIAN_FRONTEND=noninteractive
     export DEBCONF_NONINTERACTIVE_SEEN=true
 
+    # Disable appstream metadata downloads - not needed for container builds
+    # and can cause failures during mirror sync
+    rm -f /etc/apt/apt.conf.d/50appstream
+
     # Note: gfortran is necessary even if Fortran is not required, because
-    # PnetCDF does not compute compile if OpenMPI does not have Fortran
-    # support.
+    # PnetCDF does not compile if OpenMPI does not have Fortran support.
     apt-get update
-    apt-get install -y software-properties-common strace libnuma-dev libibverbs-dev libssl-dev curl wget git bash make file pkg-config gcc g++ gfortran python3-dev python3-pip autotools-dev autoconf libtool-bin libopenblas-dev libncurses5-dev
+    apt-get install -y software-properties-common strace libnuma-dev libibverbs-dev libssl-dev curl wget git bash make file pkg-config gcc g++ gfortran python3-dev python3-pip autotools-dev autoconf libtool-bin gnupg ca-certificates
 
-    # Get AMD compiler
-    cd /tmp
-    wget https://download.amd.com/developer/eula/aocc/aocc-5-0/aocc-compiler-${AOCC_VERSION}_1_amd64.deb
-    dpkg -i aocc-compiler-${AOCC_VERSION}_1_amd64.deb
-    rm aocc-compiler-${AOCC_VERSION}_1_amd64.deb*
+    # Install CUDA using NVIDIA's official repository
+    # https://developer.nvidia.com/cuda-downloads
+    wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+    dpkg -i cuda-keyring_1.1-1_all.deb
+    rm cuda-keyring_1.1-1_all.deb
+    apt-get update
+    # Install CUDA toolkit (not the driver - that's on the host)
+    # cuda-cudart-dev provides the development symlinks (libcudart.so)
+    apt-get install -y cuda-toolkit-${CONTAINER_CUDA_VERSION} cuda-cudart-dev-${CONTAINER_CUDA_VERSION}
 
-    # Set AMD as default
-    export CC=clang
-    export CXX=clang++
-    export FC=flang
+    # Set CUDA environment for subsequent build steps
+    # Ubuntu's CUDA toolkit installs libraries in targets/x86_64-linux/lib/
+    # The stubs directory contains libcuda.so needed for build-time linking
+    export CUDA_HOME=/usr/local/cuda
+    export CUDA_LIB=$CUDA_HOME/targets/x86_64-linux/lib
+    export CUDA_STUBS=$CUDA_LIB/stubs
+    export PATH=$CUDA_HOME/bin:$PATH
+    export LD_LIBRARY_PATH=$CUDA_LIB:$CUDA_STUBS:$LD_LIBRARY_PATH
+    export LIBRARY_PATH=$CUDA_LIB:$CUDA_STUBS:$LIBRARY_PATH
+    export LDFLAGS="-L$CUDA_LIB -L$CUDA_STUBS $LDFLAGS"
+    export CPPFLAGS="-I$CUDA_HOME/include $CPPFLAGS"
 
-    # Configure AOCC environment
-    . /opt/AMD/aocc-compiler-${AOCC_VERSION}/setenv_AOCC.sh
+    # Register CUDA library paths with ldconfig
+    echo "$CUDA_HOME/lib64" > /etc/ld.so.conf.d/cuda.conf
+    echo "$CUDA_HOME/lib64/stubs" >> /etc/ld.so.conf.d/cuda.conf
+    ldconfig
 
-    # Download, compile and install HWLOC
+    # Download, compile and install HWLOC with CUDA/NVML support
     rm -rf /tmp/hwloc-${CONTAINER_HWLOC_VERSION}
     curl -L https://download.open-mpi.org/release/hwloc/v2.10/hwloc-${CONTAINER_HWLOC_VERSION}.tar.bz2 | tar -xjC /tmp --no-same-owner
     cd /tmp/hwloc-${CONTAINER_HWLOC_VERSION}
-    ./configure --prefix=/usr/local
+    ./configure --prefix=/usr/local --enable-cuda --with-cuda=$CUDA_HOME
     make -j 4
     make install
-    cd /tmp && rm -rf /tmp/hwloc-${CONTAINER_HWLOC_VERSION}
 
-    # Download, compile and install LIBFABRIC
+    # Download, compile and install LIBFABRIC with CUDA support
     rm -rf /tmp/libfabric-${CONTAINER_LIBFABRIC_VERSION}
     curl -L https://github.com/ofiwg/libfabric/releases/download/v${CONTAINER_LIBFABRIC_VERSION}/libfabric-${CONTAINER_LIBFABRIC_VERSION}.tar.bz2 | tar -xjC /tmp --no-same-owner
     cd /tmp/libfabric-${CONTAINER_LIBFABRIC_VERSION}
-    ./configure --prefix=/usr/local
+    ./configure --prefix=/usr/local --with-cuda=$CUDA_HOME
     make -j 4
     make install
-    cd /tmp && rm -rf /tmp/libfabric-${CONTAINER_LIBFABRIC_VERSION}
 
     # Download, compile and install MUNGE
     rm -rf /tmp/munge-${CONTAINER_MUNGE_VERSION}
@@ -92,7 +120,6 @@ From: ubuntu:24.04
     ./configure --prefix=/usr/local
     make -j 4
     make install
-    cd /tmp && rm -rf /tmp/munge-${CONTAINER_MUNGE_VERSION}
 
     # Download, compile and install LIBEVENT
     rm -rf /tmp/libevent-${CONTAINER_LIBEVENT_VERSION}-stable
@@ -101,28 +128,25 @@ From: ubuntu:24.04
     ./configure --prefix=/usr/local
     make -j 4
     make install
-    cd /tmp && rm -rf /tmp/libevent-${CONTAINER_LIBEVENT_VERSION}-stable
 
-    # Download, compile and install UCX
+    # Download, compile and install UCX with CUDA support
     # Check compile options of native UCX on NEMO2 with `ucx_info -b`.
     rm -rf /tmp/ucx-${CONTAINER_UCX_VERSION}
     curl -L https://github.com/openucx/ucx/releases/download/v${CONTAINER_UCX_VERSION}/ucx-${CONTAINER_UCX_VERSION}.tar.gz | tar -xzC /tmp --no-same-owner
     cd /tmp/ucx-${CONTAINER_UCX_VERSION}
-    ./configure --prefix=/usr/local --enable-optimizations --enable-cma --enable-mt --with-verbs --without-java --without-go --disable-doxygen-doc --disable-logging --disable-debug --disable-assertions --disable-params-check
+    ./configure --prefix=/usr/local --enable-optimizations --enable-cma --enable-mt --with-verbs --with-cuda=$CUDA_HOME --without-java --without-go --disable-doxygen-doc --disable-logging --disable-debug --disable-assertions --disable-params-check
     make -j 4
     make install
-    cd /tmp && rm -rf /tmp/ucx-${CONTAINER_UCX_VERSION}
 
-    # Download, compile and install UCC
+    # Download, compile and install UCC with CUDA support
     # Check compile options of native UCC on NEMO2 with `ucc_info -b`.
     rm -rf /tmp/ucc-${CONTAINER_UCC_VERSION}
     curl -L https://github.com/openucx/ucc/archive/refs/tags/v${CONTAINER_UCC_VERSION}.tar.gz | tar -xzC /tmp --no-same-owner
     cd /tmp/ucc-${CONTAINER_UCC_VERSION}
     ./autogen.sh
-    ./configure --prefix=/usr/local
+    ./configure --prefix=/usr/local --with-cuda=$CUDA_HOME --with-ucx=/usr/local --with-nccl=no
     make -j 4
     make install
-    cd /tmp && rm -rf /tmp/ucc-${CONTAINER_UCC_VERSION}
 
     # Download, compile and install PMIx
     rm -rf /tmp/pmix-${CONTAINER_PMIX_VERSION}
@@ -131,7 +155,6 @@ From: ubuntu:24.04
     ./configure --prefix=/usr/local
     make -j 4
     make install
-    cd /tmp && rm -rf /tmp/pmix-${CONTAINER_PMIX_VERSION}
 
     # Download, compile and install PRRTE
     rm -rf /tmp/prrte-${CONTAINER_PRRTE_VERSION}
@@ -140,20 +163,21 @@ From: ubuntu:24.04
     ./configure --prefix=/usr/local
     make -j 4
     make install
-    cd /tmp && rm -rf /tmp/prrte-${CONTAINER_PRRTE_VERSION}
 
-    # Download, compile and install OpenMPI
+    # Download, compile and install OpenMPI with CUDA support
     # Slurm handles starting of processes and initial communication with the
     # process runs through PMIx. We also disable verbs because this
     # leads to warnings that it is not being used anyway.
     # Check compile options of native OpenMPI on JUWELS with `ompi_info`.
-    rm -rf /tmp/openmpi-${CONTAINER_OMPI_VERSION}
+    rm -rf /tmp/openmpi-$CONTAINER_OMPI_VERSION
     curl -L https://download.open-mpi.org/release/open-mpi/v5.0/openmpi-${CONTAINER_OMPI_VERSION}.tar.bz2 | tar -xjC /tmp --no-same-owner
-    cd /tmp/openmpi-${CONTAINER_OMPI_VERSION}
-    ./configure --prefix=/usr/local --enable-shared --without-orte --disable-oshmem --without-verbs --without-psm2 --with-hwloc=/usr/local --with-libevent=/usr/local --with-ofi=/usr/local --with-ucx=/usr/local --with-ucc=/usr/local --with-pmix=/usr/local --with-prrte=/usr/local
+    cd /tmp/openmpi-$CONTAINER_OMPI_VERSION
+    ./configure --prefix=/usr/local --enable-shared --without-orte --disable-oshmem --without-verbs --without-psm2 --with-hwloc=/usr/local --with-libevent=/usr/local --with-ofi=/usr/local --with-ucx=/usr/local --with-ucc=/usr/local --with-pmix=/usr/local --with-prrte=/usr/local --with-cuda=$CUDA_HOME
     make -j 4
     make install
-    cd /tmp && rm -rf /tmp/openmpi-${CONTAINER_OMPI_VERSION}
+
+    # Register shared libraries
+    ldconfig
 
     # Install mpi4py
     python3 -m pip install --break-system-packages --no-binary mpi4py mpi4py==${CONTAINER_MPI4PY_VERSION}
@@ -169,6 +193,13 @@ From: ubuntu:24.04
     cd /opt/b_eff_io
     mpicc -o b_eff_io b_eff_io.c -lm
 
+    # Cleanup to reduce image size
+    rm -rf /tmp/hwloc-* /tmp/libfabric-* /tmp/munge-* /tmp/libevent-* \
+           /tmp/ucx-* /tmp/ucc-* /tmp/pmix-* /tmp/prrte-* /tmp/openmpi-* \
+           /tmp/pip-*
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
 %environment
 
     # Send output directly to screen
@@ -182,14 +213,11 @@ From: ubuntu:24.04
     export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
     export MANPATH=/usr/local/share/man:$MANPATH
 
-    # Configure AOCC environment
-    . /opt/AMD/aocc-compiler-${AOCC_VERSION}/setenv_AOCC.sh
-
-    # Set AMD as default
-    export CC=clang
-    export CXX=clang++
-    export FC=flang
+    # CUDA environment
+    export CUDA_HOME=/usr/local/cuda
+    export PATH=$CUDA_HOME/bin:$PATH
+    export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 
 %runscript
 
-    python3 "$@" 
+    python3 "$@"

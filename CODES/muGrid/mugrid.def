@@ -1,6 +1,19 @@
 Bootstrap: localimage
 From: netcdf_fftw_pfft.sif
 
+%help
+
+    muGrid container with MPI and GPU support.
+
+    This recipe autodetects the GPU backend from the base container:
+    - If CUDA is available (nvcc in PATH), builds with CUDA support
+    - If ROCm is available (hipcc in PATH), builds with HIP support
+    - Otherwise, builds CPU-only
+
+    Run with appropriate GPU flags:
+    - NVIDIA: srun apptainer exec --nv container.sif ...
+    - AMD:    srun apptainer exec --rocm container.sif ...
+
 %post
 
     if [ -e /usr/share/modulefiles ]; then
@@ -20,11 +33,12 @@ From: netcdf_fftw_pfft.sif
     export DEBIAN_FRONTEND=noninteractive
     export DEBCONF_NONINTERACTIVE_SEEN=true
 
-    if $(command -v dnf); then
+    if command -v dnf > /dev/null 2>&1; then
         # We are on RedHat
         dnf install -y boost-devel
     else
         # We are on Debian
+        apt-get update
         apt-get install -y libboost-test-dev
     fi
 
@@ -41,8 +55,51 @@ From: netcdf_fftw_pfft.sif
     # NEMO: -march=sandybridge -mno-avx512f
     # JUWELS: -march=skylake
     # NEMO2: -march=znver4
-    # https://www.amd.com/content/dam/amd/en/documents/developer/compiler-options-quick-ref-guide-amd-epyc-9xx4-series-processors.pdf
-    export OPT_FLAGS="-O2 -march=znver4"
+    # Use generic optimization for portability; specific march can be set in base container
+    export OPT_FLAGS="-O2"
+
+    # Autodetect GPU backend
+    GPU_CMAKE_FLAGS=""
+    GPU_BACKEND="none"
+
+    # Check for CUDA (NVIDIA)
+    if [ -d "/usr/local/cuda" ] || command -v nvcc > /dev/null 2>&1; then
+        echo "Detected CUDA environment - enabling CUDA support"
+        GPU_BACKEND="cuda"
+        GPU_CMAKE_FLAGS="-DMUGRID_ENABLE_CUDA=ON"
+        # Set CUDA environment if not already set
+        if [ -d "/usr/local/cuda" ]; then
+            export CUDA_HOME=/usr/local/cuda
+            export PATH=$CUDA_HOME/bin:$PATH
+            export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+        fi
+        # H200 is Hopper (sm_90), also include Ampere (sm_80) for compatibility
+        GPU_CMAKE_FLAGS="$GPU_CMAKE_FLAGS -DCMAKE_CUDA_ARCHITECTURES=80;90"
+    fi
+
+    # Check for ROCm (AMD) - only if CUDA not found
+    if [ "$GPU_BACKEND" = "none" ]; then
+        if [ -d "/opt/rocm" ] || command -v hipcc > /dev/null 2>&1; then
+            echo "Detected ROCm environment - enabling HIP support"
+            GPU_BACKEND="rocm"
+            GPU_CMAKE_FLAGS="-DMUGRID_ENABLE_HIP=ON"
+            # Set ROCm environment if not already set
+            if [ -d "/opt/rocm" ]; then
+                export ROCM_PATH=/opt/rocm
+                export PATH=$ROCM_PATH/bin:$PATH
+                export LD_LIBRARY_PATH=$ROCM_PATH/lib:$LD_LIBRARY_PATH
+            fi
+            # MI300A is gfx942, also include MI200 series (gfx90a) for compatibility
+            GPU_CMAKE_FLAGS="$GPU_CMAKE_FLAGS -DCMAKE_HIP_ARCHITECTURES=gfx90a;gfx942"
+        fi
+    fi
+
+    if [ "$GPU_BACKEND" = "none" ]; then
+        echo "No GPU environment detected - building CPU-only"
+    fi
+
+    echo "GPU backend: $GPU_BACKEND"
+    echo "GPU CMake flags: $GPU_CMAKE_FLAGS"
 
     # Build muGrid with CMake (out-of-source build)
     mkdir -p ${MUGRID_BUILD_DIR}
@@ -53,8 +110,8 @@ From: netcdf_fftw_pfft.sif
         -DCMAKE_CXX_FLAGS="${OPT_FLAGS}" \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DCMAKE_PREFIX_PATH=/usr/local \
-        -DMUGRID_ENABLE_HIP=ON \
-        -DMUGRID_ENABLE_MPI=ON
+        -DMUGRID_ENABLE_MPI=ON \
+        ${GPU_CMAKE_FLAGS}
     make -j$(nproc)
     make install
 
