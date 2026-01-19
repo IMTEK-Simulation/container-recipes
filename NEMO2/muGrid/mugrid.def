@@ -476,6 +476,7 @@ MUGRID_VERSION=0.102.0
         libffi8 \
         libgfortran5 \
         libnuma1 \
+        ibverbs-providers \
         ca-certificates
 
     # Install Python packages that need to be present in runtime

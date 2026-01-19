@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./build.sh                    # Build with default versions
-#   ./build.sh --gpaw 25.1.0      # Build specific GPAW version
+#   ./build.sh --gpaw 25.7.0      # Build specific GPAW version
 #
 # The container is self-contained and does not require any base images.
 

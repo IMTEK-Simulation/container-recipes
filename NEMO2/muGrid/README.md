@@ -1,89 +1,57 @@
-# muGrid Container
+# muGrid Container for NEMO2
 
-Container recipes for [muGrid](https://github.com/muSpectre/muGrid), a library for grid-based computations with MPI support.
+Container recipe for [muGrid](https://github.com/muSpectre/muGrid), a library for grid-based computations with MPI support, optimized for NEMO2 (AMD EPYC Milan/Zen3).
 
-## Recipe Files
-
-| File | Description |
-|------|-------------|
-| `mugrid.def` | Standard single-stage build (large, includes full toolchain) |
-| `mugrid-multistage.def` | Multi-stage build for minimal runtime containers |
-| `mugrid-mu300a.def` | MI300A-specific build (ROCm) |
-
-## Multi-Stage Build
-
-The `mugrid-multistage.def` recipe uses Apptainer multi-stage builds to create minimal runtime containers. This significantly reduces container size by excluding compilers, headers, and static libraries.
-
-### Size Comparison
-
-| Container | Base Size | Final Size | Reduction |
-|-----------|-----------|------------|-----------|
-| Full stack (CUDA) | ~4.8 GB | ~200 MB | ~96% |
-
-### Build Arguments
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `MUGRID_ARCH` | `native` | CPU architecture (`znver4`, `skylake`, `sandybridge`, etc.) |
-| `MUGRID_GPU` | `none` | GPU backend (`none`, `cuda`, `rocm`) |
-| `MUGRID_VERSION` | `0.102.0` | muGrid version/branch to build |
-
-### Build Commands
+## Build
 
 ```bash
-# CPU-only for NEMO2 (Zen4):
-apptainer build --build-arg MUGRID_ARCH=znver4 --build-arg MUGRID_GPU=none \
-    mugrid-cpu.sif mugrid-multistage.def
+# Build the container
+./build.sh
 
-# With CUDA support:
-apptainer build --build-arg MUGRID_ARCH=znver4 --build-arg MUGRID_GPU=cuda \
-    mugrid-cuda.sif mugrid-multistage.def
-
-# With ROCm support:
-apptainer build --build-arg MUGRID_ARCH=znver4 --build-arg MUGRID_GPU=rocm \
-    mugrid-rocm.sif mugrid-multistage.def
+# Or manually:
+apptainer build -F mugrid.sif mugrid.def
 ```
 
-### Prerequisites
+The recipe is a self-contained multi-stage build that compiles the entire MPI stack from scratch, matching the native NEMO2 configuration:
 
-The multi-stage build requires a base container with MPI, PnetCDF, and (optionally) GPU toolkit:
-
-```bash
-# Create symlink to appropriate base container
-ln -sf ../../STACK/netcdf_fftw_pfft-cuda.sif netcdf_fftw_pfft.sif   # For CUDA
-ln -sf ../../STACK/netcdf_fftw_pfft-rocm.sif netcdf_fftw_pfft.sif   # For ROCm
-ln -sf ../../STACK/netcdf_fftw_pfft.sif netcdf_fftw_pfft.sif        # For CPU-only
-```
+| Component | Version |
+|-----------|---------|
+| OpenMPI | 5.0.7 |
+| PMIx | 5.0.7 |
+| UCX | 1.16.0 |
+| UCC | 1.3.0 |
+| FFTW | 3.3.10 |
+| PnetCDF | 1.14.0 |
+| muGrid | 0.102.0 |
 
 ## Usage
 
 ```bash
 # Run Python script
-apptainer run mugrid.sif script.py
+srun apptainer run mugrid.sif script.py
 
 # Execute command
 apptainer exec mugrid.sif python3 -c "import muGrid; print(muGrid.__version__)"
 
 # With MPI
 srun apptainer exec mugrid.sif python3 script.py
-
-# With GPU support
-srun apptainer exec --nv mugrid.sif ...    # NVIDIA
-srun apptainer exec --rocm mugrid.sif ...  # AMD
 ```
 
 ### Example: Poisson Solver
 
 ```bash
 # Run the included Poisson equation example
-apptainer exec mugrid.sif python3 poisson.py --nb-grid-pts 128,128
+apptainer exec mugrid.sif python3 poisson.py -n 128,128
 
 # With JSON output
-apptainer exec mugrid.sif python3 poisson.py --nb-grid-pts 128,128 --quiet --json
+apptainer exec mugrid.sif python3 poisson.py -n 128,128 -q --json
+
+# Run with MPI
+srun -n 4 apptainer exec mugrid.sif python3 poisson.py -n 256,256
 ```
 
 ## Notes
 
-- The multi-stage build includes CUDA stub libraries even for CPU-only builds because mpi4py in the base container was compiled with CUDA support. This causes harmless warnings about `libnvidia-ml.so` on systems without NVIDIA GPUs.
-- Build info is stored in `/etc/mugrid-build-info` inside the container.
-- Dependencies: PnetCDF (parallel NetCDF) for I/O. FFTW/PFFT are not required by muGrid.
+- Build info is stored in `/etc/mugrid-build-info` inside the container
+- Do NOT load any MPI module on NEMO2; Slurm handles process management via PMIx
+- Container size: ~130 MB (minimal runtime, no compilers)

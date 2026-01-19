@@ -363,11 +363,13 @@ MPI4PY_VERSION=4.0.3
     cat > /tmp/gpaw-build/siteconfig.py << 'SITECONFIG'
 # GPAW build configuration for NEMO2
 
-# Compiler
-compiler = 'clang'
+# Compiler (use MPI wrappers for MPI support)
+compiler = 'mpicc'
+mpicompiler = 'mpicc'
+mpilinker = 'mpicc'
 
 # Libraries (mpi must be included so fftw3_mpi symbols are resolved)
-libraries = ['xc', 'blas', 'lapack', 'scalapack', 'fftw3', 'fftw3_mpi', 'mpi']
+libraries = ['xc', 'blas', 'lapack', 'scalapack', 'fftw3', 'fftw3_mpi']
 
 # Library directories
 library_dirs = ['/usr/local/lib', '/usr/lib/x86_64-linux-gnu']
@@ -538,6 +540,7 @@ GPAW_SETUPS_VERSION=24.11.0
         libopenblas0 \
         libgfortran5 \
         libnuma1 \
+        ibverbs-providers \
         ca-certificates
 
     # Install Python packages that need to be present in runtime
@@ -578,7 +581,7 @@ EOF
     export PYTHONUSERSITE=1
 
 %runscript
-    exec python3 "$@"
+    exec gpaw python "$@"
 
 %test
     python3 -c "import numpy; print('NumPy:', numpy.__version__)"
