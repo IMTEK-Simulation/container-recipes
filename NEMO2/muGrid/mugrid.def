@@ -23,7 +23,7 @@ From: ubuntu:24.04
 Stage: build
 
 %arguments
-MUGRID_VERSION=0.102.0
+MUGRID_VERSION=0.105.1
 
 # MPI stack versions (matched to NEMO2)
 AOCC_VERSION=5.0.0
