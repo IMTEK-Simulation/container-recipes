@@ -315,6 +315,7 @@ PNETCDF_VERSION=1.14.1
         -DPKG_DPD-BASIC=on \
         -DPKG_DPD-MESO=on \
         -DPKG_EXTRA-COMPUTE=on \
+        -DPKG_EXTRA-PAIR=on \
         -DPKG_KSPACE=on \
         -DPKG_MANYBODY=on \
         -DPKG_MISC=on \
@@ -324,6 +325,8 @@ PNETCDF_VERSION=1.14.1
         -DPKG_MOLFILE=on \
         -DPKG_NETCDF=on \
         -DPKG_OPT=on \
+        -DPKG_REACTION=on \
+        -DPKG_REPLICA=on \
         -DPKG_RIGID=on \
         -DPKG_VORONOI=on \
         -DWITH_JPEG=on \
@@ -488,9 +491,9 @@ EOF
       - OpenMPI 5.0.7 with UCX transport
       - FFTW 3.3.10 with MPI support
       - PnetCDF 1.14.1 for parallel I/O
-      - Packages: DPD-BASIC, DPD-MESO, EXTRA-COMPUTE, KSPACE, MANYBODY,
-                  MISC, ML-PACE, MANIFOLD, MOLECULE, MOLFILE, NETCDF,
-                  OPT, RIGID, VORONOI
+      - Packages: DPD-BASIC, DPD-MESO, EXTRA-COMPUTE, EXTRA-PAIR, KSPACE,
+                  MANYBODY, MANIFOLD, MISC, ML-PACE, MOLECULE, MOLFILE,
+                  NETCDF, OPT, REACTION, REPLICA, RIGID, VORONOI
       - JPEG and PNG support for dump images
 
     Usage:
