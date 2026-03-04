@@ -42,7 +42,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Output filename with versions
-OUTPUT_FILE="gpaw-${GPAW_VERSION}_setups-${GPAW_SETUPS_VERSION}.sif"
+OUTPUT_FILE="nemo2-gpaw-${GPAW_VERSION}_setups-${GPAW_SETUPS_VERSION}.sif"
 
 echo "Building GPAW container with:"
 echo "  GPAW version:   ${GPAW_VERSION}"

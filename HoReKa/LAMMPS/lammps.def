@@ -9,9 +9,15 @@
 #   apptainer build -F lammps.sif lammps.def
 #
 # Usage:
-#   srun apptainer exec lammps.sif lmp -in input.lammps
+#   srun --mpi=pmix apptainer exec lammps.sif lmp -in input.lammps
 #
 # Note: Check HoReKa documentation for proper MPI module loading.
+# Recommended host modules:
+#   module load compiler/gnu/13 mpi/openmpi/5.0
+#
+# Target Slurm version: 25.11.2 (reported by srun --version)
+# Important: Although HoReKa's default MPI is pmi2 (MpiDefault=pmi2),
+# OpenMPI 5.0+ does NOT support PMI-2. You MUST use --mpi=pmix.
 
 ######################################################################
 # STAGE 1: BUILD
@@ -39,6 +45,7 @@ OMPI_VERSION=5.0.7
 # Library versions
 FFTW_VERSION=3.3.10
 PNETCDF_VERSION=1.14.1
+VORO_VERSION=0.4.6
 
 %post
     # ================================================================
@@ -57,6 +64,7 @@ PNETCDF_VERSION=1.14.1
     OMPI_VERSION="{{ OMPI_VERSION }}"
     FFTW_VERSION="{{ FFTW_VERSION }}"
     PNETCDF_VERSION="{{ PNETCDF_VERSION }}"
+    VORO_VERSION="{{ VORO_VERSION }}"
 
     echo "=========================================="
     echo "LAMMPS Build Configuration:"
@@ -64,6 +72,7 @@ PNETCDF_VERSION=1.14.1
     echo "  OpenMPI:         ${OMPI_VERSION}"
     echo "  FFTW:            ${FFTW_VERSION}"
     echo "  PnetCDF:         ${PNETCDF_VERSION}"
+    echo "  Voro++:          ${VORO_VERSION}"
     echo "=========================================="
 
     # ================================================================
@@ -215,7 +224,7 @@ PNETCDF_VERSION=1.14.1
     rm -rf /tmp/pmix-${PMIX_VERSION}
     curl -sL https://github.com/openpmix/openpmix/releases/download/v${PMIX_VERSION}/pmix-${PMIX_VERSION}.tar.bz2 | tar --no-same-owner -xjC /tmp
     cd /tmp/pmix-${PMIX_VERSION}
-    ./configure --prefix=/usr/local --with-libevent=/usr/local --with-hwloc=/usr/local
+    ./configure --prefix=/usr/local --with-libevent=/usr/local --with-hwloc=/usr/local --with-munge
     make -j$(nproc)
     make install
     rm -rf /tmp/pmix-${PMIX_VERSION}
@@ -246,6 +255,8 @@ PNETCDF_VERSION=1.14.1
         --enable-shared \
         --enable-static \
         --enable-mpi-fortran=no \
+        --enable-mpirun-prefix-by-default \
+        --disable-heterogeneous \
         --without-orte \
         --disable-oshmem \
         --without-verbs \
@@ -261,6 +272,14 @@ PNETCDF_VERSION=1.14.1
     make -j$(nproc)
     make install
     rm -rf /tmp/openmpi-${OMPI_VERSION}
+
+    # ================================================================
+    # Build LLNL MPI benchmark
+    # ================================================================
+    cd /opt
+    git clone https://github.com/LLNL/mpiBench.git
+    cd mpiBench
+    make
 
     # ================================================================
     # Build FFTW with MPI support
@@ -299,8 +318,24 @@ PNETCDF_VERSION=1.14.1
     rm -rf /tmp/pnetcdf-${PNETCDF_VERSION}
 
     # ================================================================
+    # Build Voro++
+    # ================================================================
+    cd /tmp
+    echo "Building Voro++ ${VORO_VERSION}..."
+    rm -rf /tmp/voro++-${VORO_VERSION}
+    curl -sL https://math.lbl.gov/voro++/download/dir/voro++-${VORO_VERSION}.tar.gz | tar --no-same-owner -xzC /tmp
+    cd /tmp/voro++-${VORO_VERSION}
+    # Patch Makefile for custom prefix and compiler flags
+    sed -i "s|^PREFIX=.*|PREFIX=/usr/local|" config.mk
+    sed -i "s|^CFLAGS=.*|CFLAGS=${OPT_FLAGS} -fPIC|" config.mk
+    make -j$(nproc)
+    make install
+    rm -rf /tmp/voro++-${VORO_VERSION}
+
+    # ================================================================
     # Build LAMMPS
     # ================================================================
+    cd /tmp
     echo "Building LAMMPS ${LAMMPS_VERSION}..."
     rm -rf /tmp/lammps
     git clone -b ${LAMMPS_VERSION} https://github.com/lammps/lammps.git /tmp/lammps
@@ -345,6 +380,12 @@ PNETCDF_VERSION=1.14.1
     mkdir -p /staging/usr/local/share
     mkdir -p /staging/usr/lib
     mkdir -p /staging/etc
+    mkdir -p /staging/opt
+
+    # -------------------------------
+    # Copy mpiBench
+    # -------------------------------
+    cp -a /opt/mpiBench /staging/opt/
 
     # -------------------------------
     # Copy all shared libraries from /usr/local/lib
@@ -402,6 +443,8 @@ LAMMPS_VERSION=${LAMMPS_VERSION}
 OMPI_VERSION=${OMPI_VERSION}
 FFTW_VERSION=${FFTW_VERSION}
 PNETCDF_VERSION=${PNETCDF_VERSION}
+VORO_VERSION=${VORO_VERSION}
+SLURM_VERSION=25.11.2
 BUILD_DATE=$(date -Iseconds)
 TARGET_ARCH=icelake-server
 EOF
@@ -425,6 +468,7 @@ Stage: runtime
     /staging/usr/local/ /usr/local
     /staging/usr/lib/ /usr/lib
     /staging/etc/lammps-build-info /etc/lammps-build-info
+    /staging/opt/ /opt
 
 %post
     export DEBIAN_FRONTEND=noninteractive
@@ -487,6 +531,9 @@ EOF
 
     Build info: /etc/lammps-build-info
 
+    MPI Benchmarks:
+      - mpiBench (at /opt/mpiBench/mpiBench)
+
     Features:
       - OpenMPI 5.0.7 with UCX transport
       - FFTW 3.3.10 with MPI support
@@ -498,16 +545,25 @@ EOF
 
     Usage:
       # Run LAMMPS input script
-      srun apptainer exec lammps.sif lmp -in input.lammps
+      # For Slurm 25.11 on HoReKa:
+      # NOTE: --mpi=pmix is MANDATORY as OpenMPI 5.x dropped PMI-2 support,
+      # which is the cluster's default (MpiDefault=pmi2).
+      srun --mpi=pmix apptainer exec lammps.sif lmp -in input.lammps
 
       # Run with container as runscript
-      srun apptainer run lammps.sif -in input.lammps
+      srun --mpi=pmix apptainer run lammps.sif -in input.lammps
 
       # Check LAMMPS version
       apptainer exec lammps.sif lmp -h
 
+      # Run MPI benchmark
+      srun --mpi=pmix apptainer exec lammps.sif /opt/mpiBench/mpiBench
+
     Note: Check HoReKa documentation for proper MPI module loading
-    and Slurm integration.
+    and Slurm integration. Slurm 25.11.2 is supported via PMIx.
+
+    Recommended modules:
+      module load compiler/gnu/13 mpi/openmpi/5.0
 
 %labels
     Author Pastewka Lab

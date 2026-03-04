@@ -27,7 +27,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Output filename with version
-OUTPUT_FILE="lammps-${LAMMPS_VERSION}.sif"
+OUTPUT_FILE="horeka-lammps-${LAMMPS_VERSION}.sif"
 
 echo "Building LAMMPS container with:"
 echo "  LAMMPS version: ${LAMMPS_VERSION}"

@@ -27,7 +27,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Output filename with version
-OUTPUT_FILE="mugrid-${MUGRID_VERSION}.sif"
+OUTPUT_FILE="nemo2-mugrid-${MUGRID_VERSION}.sif"
 
 echo "Building muGrid container with:"
 echo "  muGrid version: ${MUGRID_VERSION}"
