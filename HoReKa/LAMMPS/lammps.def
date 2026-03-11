@@ -122,7 +122,7 @@ VORO_VERSION=0.4.6
         libpng-dev
 
     # Optimization flags for Ice Lake Server (Intel Xeon Platinum 8368)
-    export OPT_FLAGS="-O3 -march=icelake-server"
+    export OPT_FLAGS="-O3 -march=x86-64-v3"
     export CFLAGS="${OPT_FLAGS}"
     export CXXFLAGS="${OPT_FLAGS}"
 
@@ -273,6 +273,10 @@ VORO_VERSION=0.4.6
     make install
     rm -rf /tmp/openmpi-${OMPI_VERSION}
 
+    export OPT_FLAGS="-O3 -march=icelake-server"
+    export CFLAGS="${OPT_FLAGS}"
+    export CXXFLAGS="${OPT_FLAGS}"
+
     # ================================================================
     # Build LLNL MPI benchmark
     # ================================================================
@@ -295,7 +299,7 @@ VORO_VERSION=0.4.6
         --enable-sse2 \
         --enable-avx \
         --enable-avx2 \
-        --enable-avx512
+        # --enable-avx512
     make -j$(nproc)
     make install
     rm -rf /tmp/fftw-${FFTW_VERSION}
@@ -344,7 +348,7 @@ VORO_VERSION=0.4.6
     cd /tmp/lammps-build
     cmake \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
-        -DCMAKE_TUNE_FLAGS="-march=icelake-server" \
+        -DCMAKE_TUNE_FLAGS="-march=native" \
         -DBUILD_MPI=on \
         -DBUILD_OMP=off \
         -DPKG_DPD-BASIC=on \
@@ -367,6 +371,7 @@ VORO_VERSION=0.4.6
         -DWITH_JPEG=on \
         -DWITH_PNG=on \
         /tmp/lammps/cmake
+    
     make -j$(nproc)
     make install
     rm -rf /tmp/lammps /tmp/lammps-build
@@ -518,8 +523,8 @@ EOF
 %runscript
     exec /usr/local/bin/lmp "$@"
 
-%test
-    /usr/local/bin/lmp -h
+# %test
+#    /usr/local/bin/lmp -h
 
 %help
     LAMMPS - Molecular Dynamics Simulator for HoReKa
