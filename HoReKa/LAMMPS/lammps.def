@@ -349,6 +349,7 @@ VORO_VERSION=0.4.6
     cmake \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DCMAKE_TUNE_FLAGS="-march=native" \
+        -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_MPI=on \
         -DBUILD_OMP=off \
         -DPKG_DPD-BASIC=on \
