@@ -1,0 +1,362 @@
+# muGrid Serial (non-MPI) Multi-Stage Build Recipe for NEMO2
+#
+# This recipe creates a minimal runtime container for a *serial* muGrid build on
+# NEMO2 (AMD EPYC Milan/Zen3). In contrast to mugrid.def there is no MPI stack
+# at all: no OpenMPI, PMIx, PRRTE, UCX, UCC, libfabric, hwloc, MUNGE or mpi4py.
+# Parallel I/O via PnetCDF is replaced by the serial Unidata NetCDF-C library.
+#
+# Use this container for single-process runs (post-processing, small studies,
+# debugging). For MPI-parallel runs on NEMO2 use mugrid.def instead.
+#
+# Build:
+#   apptainer build -F mugrid-serial.sif mugrid-serial.def
+#
+# Usage:
+#   apptainer run mugrid-serial.sif script.py
+#   apptainer exec mugrid-serial.sif python3 -c "import muGrid; print(muGrid.version_string())"
+#
+# Note: This container has no MPI. Do not launch it with srun or mpirun; every
+# task would run the identical serial calculation.
+
+######################################################################
+# STAGE 1: BUILD
+# Full development environment with compilers, headers, and build tools
+######################################################################
+
+Bootstrap: docker
+From: ubuntu:24.04
+Stage: build
+
+%arguments
+MUGRID_VERSION=1.0.0
+
+# Compiler
+AOCC_VERSION=5.0.0
+
+# Serial NetCDF (replaces the PnetCDF of the MPI build)
+NETCDF_VERSION=4.9.3
+
+%post
+    # ================================================================
+    # Configuration from build arguments
+    # ================================================================
+    MUGRID_VERSION="{{ MUGRID_VERSION }}"
+
+    AOCC_VERSION="{{ AOCC_VERSION }}"
+    NETCDF_VERSION="{{ NETCDF_VERSION }}"
+
+    echo "=========================================="
+    echo "muGrid (serial) Build Configuration:"
+    echo "  muGrid Version:  ${MUGRID_VERSION}"
+    echo "  NetCDF Version:  ${NETCDF_VERSION}"
+    echo "  MPI:             disabled"
+    echo "=========================================="
+
+    # ================================================================
+    # Environment setup
+    # ================================================================
+    export PATH=/usr/local/bin:$PATH
+    export LD_RUN_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+    export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+    export MANPATH=/usr/local/share/man:$MANPATH
+
+    export DEBIAN_FRONTEND=noninteractive
+    export DEBCONF_NONINTERACTIVE_SEEN=true
+
+    # ================================================================
+    # Install base development packages
+    # ================================================================
+    # No InfiniBand/RDMA/NUMA/Fortran packages: nothing in the serial stack
+    # needs them (they were only required by the MPI stack and PnetCDF).
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        curl \
+        wget \
+        git \
+        bash \
+        make \
+        file \
+        pkg-config \
+        gcc \
+        g++ \
+        python3-dev \
+        python3-pip \
+        cmake \
+        ca-certificates \
+        zlib1g-dev \
+        libncurses5-dev \
+        bzip2 \
+        xz-utils
+
+    # ================================================================
+    # Install AMD AOCC compiler (optimized for Zen)
+    # ================================================================
+    cd /tmp
+    wget -q https://download.amd.com/developer/eula/aocc/aocc-5-0/aocc-compiler-${AOCC_VERSION}_1_amd64.deb
+    dpkg -i aocc-compiler-${AOCC_VERSION}_1_amd64.deb
+    rm aocc-compiler-${AOCC_VERSION}_1_amd64.deb
+
+    # Configure AOCC environment
+    . /opt/AMD/aocc-compiler-${AOCC_VERSION}/setenv_AOCC.sh
+    export CC=clang
+    export CXX=clang++
+
+    # Optimization flags for Milan (Zen3)
+    export OPT_FLAGS="-O3 -march=znver3"
+    export CFLAGS="${OPT_FLAGS}"
+    export CXXFLAGS="${OPT_FLAGS}"
+
+    # ================================================================
+    # Build serial NetCDF (Unidata NetCDF-C)
+    # ================================================================
+    # Configured like the muGrid upstream wheels: classic + CDF5 formats, no
+    # HDF5 (and hence no netCDF-4 dependency chain), no remote access, no
+    # plugins and no command line utilities.
+    echo "Building NetCDF ${NETCDF_VERSION}..."
+    rm -rf /tmp/netcdf-c-${NETCDF_VERSION} /tmp/build-netcdf
+    curl -sL https://github.com/Unidata/netcdf-c/archive/refs/tags/v${NETCDF_VERSION}.tar.gz | tar --no-same-owner -xzC /tmp
+    mkdir -p /tmp/build-netcdf
+    cd /tmp/build-netcdf
+    cmake /tmp/netcdf-c-${NETCDF_VERSION} \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_C_FLAGS="${OPT_FLAGS}" \
+        -DBUILD_SHARED_LIBS=ON \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DNETCDF_ENABLE_CDF5=ON \
+        -DNETCDF_ENABLE_HDF5=OFF \
+        -DNETCDF_ENABLE_DAP=OFF \
+        -DNETCDF_ENABLE_DAP2=OFF \
+        -DNETCDF_ENABLE_DAP4=OFF \
+        -DNETCDF_ENABLE_BYTERANGE=OFF \
+        -DNETCDF_ENABLE_NCZARR=OFF \
+        -DNETCDF_ENABLE_PLUGINS=OFF \
+        -DNETCDF_BUILD_UTILITIES=OFF \
+        -DBUILD_TESTING=OFF \
+        -DBUILD_TESTSETS=OFF
+    make -j$(nproc)
+    make install
+    ldconfig
+    rm -rf /tmp/netcdf-c-${NETCDF_VERSION} /tmp/build-netcdf
+
+    # ================================================================
+    # Install Python packages
+    # ================================================================
+    # No mpi4py and no NuMPI: both are MPI-only. muTimer is a runtime
+    # dependency of the muGrid Python package.
+    echo "Installing Python packages..."
+    cd /tmp
+    pip install --break-system-packages --no-cache-dir \
+        numpy \
+        scipy \
+        pybind11 \
+        muTimer
+
+    # ================================================================
+    # Build muGrid (serial)
+    # ================================================================
+    echo "Building muGrid ${MUGRID_VERSION} without MPI..."
+
+    export MUGRID_SRC_DIR=/tmp/mugrid
+    export MUGRID_BUILD_DIR=/tmp/mugrid-build
+
+    rm -rf ${MUGRID_SRC_DIR} ${MUGRID_BUILD_DIR}
+    git clone --recurse-submodules -b ${MUGRID_VERSION} \
+        https://github.com/muSpectre/muGrid.git ${MUGRID_SRC_DIR}
+
+    mkdir -p ${MUGRID_BUILD_DIR}
+    cd ${MUGRID_BUILD_DIR}
+
+    # muGrid selects the serial Unidata NetCDF backend (instead of PnetCDF)
+    # when MUGRID_ENABLE_MPI is OFF. FFTW is not needed at all: muGrid uses the
+    # bundled pocketfft.
+    cmake ${MUGRID_SRC_DIR} \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_FLAGS="${OPT_FLAGS}" \
+        -DCMAKE_CXX_FLAGS="${OPT_FLAGS}" \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_PREFIX_PATH=/usr/local \
+        -Dpybind11_DIR=$(python3 -m pybind11 --cmakedir) \
+        -DMUGRID_ENABLE_MPI=OFF \
+        -DMUGRID_ENABLE_NETCDF=ON \
+        -DMUGRID_ENABLE_PYTHON=ON \
+        -DMUGRID_ENABLE_TESTS=OFF \
+        -DMUGRID_ENABLE_EXAMPLES=OFF
+
+    make -j$(nproc)
+    make install
+
+    # muGrid's CMake install puts the Python package into the interpreter's
+    # platlib (/usr/lib/python3/dist-packages on Ubuntu). Move it below
+    # /usr/local so the staging step picks it up and the runtime image finds it
+    # via PYTHONPATH.
+    PY_PLATLIB=$(python3 -c "import sysconfig; print(sysconfig.get_path('platlib'))")
+    PY_DEST=$(python3 -c "import sys; print(f'/usr/local/lib/python{sys.version_info.major}.{sys.version_info.minor}/dist-packages')")
+    if [ "${PY_PLATLIB}" != "${PY_DEST}" ] && [ -d "${PY_PLATLIB}/muGrid" ]; then
+        mkdir -p ${PY_DEST}
+        cp -a ${PY_PLATLIB}/muGrid ${PY_DEST}/
+        rm -rf ${PY_PLATLIB}/muGrid
+    fi
+
+    # Fail the build here (rather than in %test) if the bindings are unusable
+    # or were configured with the wrong backends.
+    python3 -c "import muGrid; print(muGrid.version_string())"
+    python3 -c "import muGrid; assert not muGrid.has_mpi, 'MPI is enabled, this should be a serial build'"
+    python3 -c "import muGrid; assert muGrid.has_netcdf, 'NetCDF I/O is missing'"
+
+    rm -rf ${MUGRID_SRC_DIR} ${MUGRID_BUILD_DIR}
+
+    # ================================================================
+    # Prepare staging area with only runtime files
+    # ================================================================
+    echo "Preparing staging area..."
+    mkdir -p /staging/usr/local/lib
+    mkdir -p /staging/usr/local/include
+    mkdir -p /staging/usr/lib
+    mkdir -p /staging/etc
+
+    # -------------------------------
+    # Shared libraries from /usr/local/lib (NetCDF)
+    # -------------------------------
+    find /usr/local/lib -maxdepth 1 -name "*.so*" -type f -exec cp -a {} /staging/usr/local/lib/ \;
+    find /usr/local/lib -maxdepth 1 -name "*.so*" -type l -exec cp -a {} /staging/usr/local/lib/ \;
+
+    # Python packages (numpy, scipy, muTimer, muGrid bindings)
+    cp -a /usr/local/lib/python3* /staging/usr/local/lib/
+
+    # C++ development files for downstream builds (muGrid is a static library)
+    cp -a /usr/local/lib/libmuGrid.a /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /usr/local/include/libmugrid /staging/usr/local/include/ 2>/dev/null || true
+    mkdir -p /staging/usr/local/lib/cmake
+    cp -a /usr/local/lib/cmake/muGrid /staging/usr/local/lib/cmake/ 2>/dev/null || true
+
+    # -------------------------------
+    # System runtime libraries
+    # -------------------------------
+    # GCC atomic operations
+    cp -a /usr/lib/x86_64-linux-gnu/libatomic*.so* /staging/usr/lib/ 2>/dev/null || true
+
+    # -------------------------------
+    # Build info
+    # -------------------------------
+    cat > /staging/etc/mugrid-build-info << EOF
+MUGRID_VERSION=${MUGRID_VERSION}
+MPI=disabled
+NETCDF_VERSION=${NETCDF_VERSION}
+BUILD_DATE=$(date -Iseconds)
+TARGET_ARCH=znver3
+EOF
+
+    echo "=========================================="
+    echo "Staging area summary:"
+    du -sh /staging/*
+    echo "=========================================="
+
+
+######################################################################
+# STAGE 2: RUNTIME
+# Minimal Ubuntu container with only essential runtime components
+######################################################################
+
+Bootstrap: docker
+From: ubuntu:24.04
+Stage: runtime
+
+%arguments
+MUGRID_VERSION=1.0.0
+
+%files from build
+    /staging/usr/local/ /usr/local
+    /staging/usr/lib/ /usr/lib
+    /staging/etc/mugrid-build-info /etc/mugrid-build-info
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+
+    # ================================================================
+    # Install only essential runtime packages
+    # ================================================================
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        libstdc++6 \
+        libgcc-s1 \
+        libc6 \
+        zlib1g \
+        liblzma5 \
+        libffi8 \
+        ca-certificates
+
+    # Python packages that need to be present in the runtime image
+    pip install --break-system-packages --no-cache-dir numpy scipy muTimer
+
+    # ================================================================
+    # Cleanup to minimize image size
+    # ================================================================
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+    rm -rf /usr/share/doc /usr/share/man /usr/share/info
+    rm -rf /var/cache/apt/archives
+
+    # ================================================================
+    # Configure library paths
+    # ================================================================
+    cat > /etc/ld.so.conf.d/mugrid.conf << 'EOF'
+/usr/local/lib
+/usr/lib
+EOF
+
+    ldconfig
+
+%environment
+    export PATH=/usr/local/bin:$PATH
+    export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+    export PYTHONPATH=/usr/local/lib/python3.12/dist-packages:$PYTHONPATH
+    export LC_ALL=C
+    export PYTHONUNBUFFERED=1
+    export PYTHONUSERSITE=1
+
+%runscript
+    exec python3 "$@"
+
+%test
+    python3 -c "import numpy; print('NumPy:', numpy.__version__)"
+    python3 -c "import scipy; print('SciPy:', scipy.__version__)"
+    python3 -c "import muGrid; print('muGrid:', muGrid.__version__)"
+    python3 -c "import muGrid; print(muGrid.version_string())"
+    python3 -c "import muGrid; assert not muGrid.has_mpi, 'container is not serial'"
+    python3 -c "import muGrid; assert muGrid.netcdf_backend == 'NetCDF', muGrid.netcdf_backend"
+
+%help
+    muGrid (serial build) - Grid-based Simulation Library for NEMO2
+    ==============================================================
+
+    This container provides a serial (non-MPI) muGrid compiled for AMD EPYC
+    Milan/Zen3 (NEMO2). Multi-stage build for minimal container size.
+
+    Build info: /etc/mugrid-build-info
+
+    Features:
+      - No MPI: single-process execution only
+      - Unidata NetCDF (serial, classic/CDF5 formats) for file I/O
+      - pocketfft (bundled with muGrid) for FFTs
+
+    Usage:
+      # Run Python script with muGrid
+      apptainer run mugrid-serial.sif script.py
+
+      # Check the muGrid build configuration
+      apptainer exec mugrid-serial.sif python3 -c "import muGrid; print(muGrid.version_string())"
+
+      # Interactive Python
+      apptainer exec mugrid-serial.sif python3
+
+    Note: Do not launch this container with srun or mpirun. For MPI-parallel
+    runs use the container built from mugrid.def.
+
+%labels
+    Author Pastewka Lab
+    Version {{ MUGRID_VERSION }}
+    Description muGrid for NEMO2 (Milan/Zen3) - serial, minimal runtime container

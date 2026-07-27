@@ -23,7 +23,7 @@ From: ubuntu:24.04
 Stage: build
 
 %arguments
-MUGRID_VERSION=0.105.1
+MUGRID_VERSION=1.0.0
 
 # MPI stack versions (matched to NEMO2)
 AOCC_VERSION=5.0.0
@@ -39,7 +39,6 @@ OMPI_VERSION=5.0.7
 MPI4PY_VERSION=4.0.3
 
 # Library versions
-FFTW_VERSION=3.3.10
 PNETCDF_VERSION=1.14.0
 
 %post
@@ -59,14 +58,12 @@ PNETCDF_VERSION=1.14.0
     PRRTE_VERSION="{{ PRRTE_VERSION }}"
     OMPI_VERSION="{{ OMPI_VERSION }}"
     MPI4PY_VERSION="{{ MPI4PY_VERSION }}"
-    FFTW_VERSION="{{ FFTW_VERSION }}"
     PNETCDF_VERSION="{{ PNETCDF_VERSION }}"
 
     echo "=========================================="
     echo "muGrid Build Configuration:"
     echo "  muGrid Version:  ${MUGRID_VERSION}"
     echo "  OpenMPI:         ${OMPI_VERSION}"
-    echo "  FFTW:            ${FFTW_VERSION}"
     echo "  PnetCDF:         ${PNETCDF_VERSION}"
     echo "=========================================="
 
@@ -276,25 +273,6 @@ PNETCDF_VERSION=1.14.0
     rm -rf /tmp/openmpi-${OMPI_VERSION}
 
     # ================================================================
-    # Build FFTW with MPI support
-    # ================================================================
-    echo "Building FFTW ${FFTW_VERSION}..."
-    rm -rf /tmp/fftw-${FFTW_VERSION}
-    curl -sL http://www.fftw.org/fftw-${FFTW_VERSION}.tar.gz | tar --no-same-owner -xzC /tmp
-    cd /tmp/fftw-${FFTW_VERSION}
-    ./configure --prefix=/usr/local \
-        --enable-shared \
-        --enable-mpi \
-        --disable-fortran \
-        --enable-sse2 \
-        --enable-avx \
-        --enable-avx2 \
-        --enable-avx512
-    make -j$(nproc)
-    make install
-    rm -rf /tmp/fftw-${FFTW_VERSION}
-
-    # ================================================================
     # Build PnetCDF
     # ================================================================
     echo "Building PnetCDF ${PNETCDF_VERSION}..."
@@ -318,7 +296,8 @@ PNETCDF_VERSION=1.14.0
     pip install --break-system-packages --no-cache-dir \
         numpy \
         scipy \
-        pybind11
+        pybind11 \
+        muTimer
 
     # Install mpi4py (compile from source to use our MPI)
     pip install --break-system-packages --no-cache-dir --no-binary mpi4py mpi4py==${MPI4PY_VERSION}
@@ -341,16 +320,41 @@ PNETCDF_VERSION=1.14.0
     mkdir -p ${MUGRID_BUILD_DIR}
     cd ${MUGRID_BUILD_DIR}
 
+    # With MPI enabled muGrid uses PnetCDF for parallel file I/O. FFTW is not
+    # needed at all: muGrid uses the bundled pocketfft.
     cmake ${MUGRID_SRC_DIR} \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_FLAGS="${OPT_FLAGS}" \
         -DCMAKE_CXX_FLAGS="${OPT_FLAGS}" \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DCMAKE_PREFIX_PATH=/usr/local \
-        -DMUGRID_ENABLE_MPI=ON
+        -Dpybind11_DIR=$(python3 -m pybind11 --cmakedir) \
+        -DMUGRID_ENABLE_MPI=ON \
+        -DMUGRID_ENABLE_NETCDF=ON \
+        -DMUGRID_ENABLE_PYTHON=ON \
+        -DMUGRID_ENABLE_TESTS=OFF \
+        -DMUGRID_ENABLE_EXAMPLES=OFF
 
     make -j$(nproc)
     make install
+
+    # muGrid's CMake install puts the Python package into the interpreter's
+    # platlib (/usr/lib/python3/dist-packages on Ubuntu). Move it below
+    # /usr/local so the staging step picks it up and the runtime image finds it
+    # via PYTHONPATH.
+    PY_PLATLIB=$(python3 -c "import sysconfig; print(sysconfig.get_path('platlib'))")
+    PY_DEST=$(python3 -c "import sys; print(f'/usr/local/lib/python{sys.version_info.major}.{sys.version_info.minor}/dist-packages')")
+    if [ "${PY_PLATLIB}" != "${PY_DEST}" ] && [ -d "${PY_PLATLIB}/muGrid" ]; then
+        mkdir -p ${PY_DEST}
+        cp -a ${PY_PLATLIB}/muGrid ${PY_DEST}/
+        rm -rf ${PY_PLATLIB}/muGrid
+    fi
+
+    # Fail the build here (rather than in %test) if the bindings are unusable
+    # or were configured with the wrong backends.
+    python3 -c "import muGrid; print('muGrid', muGrid.__version__, muGrid.netcdf_backend, muGrid.netcdf_version)"
+    python3 -c "import muGrid; assert muGrid.has_mpi, 'MPI support is missing'"
+    python3 -c "import muGrid; assert muGrid.has_netcdf, 'NetCDF I/O is missing'"
 
     rm -rf ${MUGRID_SRC_DIR} ${MUGRID_BUILD_DIR}
 
@@ -429,7 +433,6 @@ PNETCDF_VERSION=1.14.0
     cat > /staging/etc/mugrid-build-info << EOF
 MUGRID_VERSION=${MUGRID_VERSION}
 OMPI_VERSION=${OMPI_VERSION}
-FFTW_VERSION=${FFTW_VERSION}
 PNETCDF_VERSION=${PNETCDF_VERSION}
 BUILD_DATE=$(date -Iseconds)
 TARGET_ARCH=znver3
@@ -451,7 +454,7 @@ From: ubuntu:24.04
 Stage: runtime
 
 %arguments
-MUGRID_VERSION=0.102.0
+MUGRID_VERSION=1.0.0
 
 %files from build
     /staging/usr/local/ /usr/local
@@ -480,10 +483,12 @@ MUGRID_VERSION=0.102.0
         ca-certificates
 
     # Install Python packages that need to be present in runtime
-    pip install --break-system-packages --no-cache-dir numpy scipy
+    pip install --break-system-packages --no-cache-dir numpy scipy muTimer
 
-    # Install mpi4py (uses our MPI libraries from build stage)
-    pip install --break-system-packages --no-cache-dir mpi4py
+    # Do NOT pip install mpi4py here: the PyPI wheels ship their own bundled
+    # MPI, which would shadow the container's OpenMPI and break the PMIx
+    # handshake with Slurm. The build stage compiled mpi4py against our MPI and
+    # the staging step copied it into dist-packages.
 
     # Install NuMPI
     pip install --break-system-packages --no-cache-dir NuMPI
@@ -535,9 +540,9 @@ EOF
 
     Features:
       - OpenMPI 5.0.7 with UCX transport
-      - FFTW 3.3.10 with MPI support
       - PnetCDF for parallel I/O
       - NuMPI for parallel algorithms
+      - pocketfft (bundled with muGrid) for FFTs
 
     Usage:
       # Run Python script with muGrid
