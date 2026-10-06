@@ -28,7 +28,7 @@ From: ubuntu:24.04
 Stage: build
 
 %arguments
-MUGRID_VERSION=1.0.0
+MUGRID_VERSION=1.4.0
 
 # Compiler
 AOCC_VERSION=5.0.0

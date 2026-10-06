@@ -11,7 +11,7 @@
 set -e
 
 # Default version
-MUGRID_VERSION="${MUGRID_VERSION:-1.0.0}"
+MUGRID_VERSION="${MUGRID_VERSION:-1.4.0}"
 
 # MPI build by default
 SERIAL=0
