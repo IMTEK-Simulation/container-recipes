@@ -10,6 +10,9 @@
 
 set -e
 
+# Directory containing this script (and the .def recipes)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Default version
 MUGRID_VERSION="${MUGRID_VERSION:-1.4.0}"
 
@@ -36,10 +39,10 @@ done
 
 # Recipe and output filename with version
 if [[ ${SERIAL} -eq 1 ]]; then
-    DEF_FILE="mugrid-serial.def"
+    DEF_FILE="${SCRIPT_DIR}/mugrid-serial.def"
     OUTPUT_FILE="nemo2-mugrid-serial-${MUGRID_VERSION}.sif"
 else
-    DEF_FILE="mugrid.def"
+    DEF_FILE="${SCRIPT_DIR}/mugrid.def"
     OUTPUT_FILE="nemo2-mugrid-${MUGRID_VERSION}.sif"
 fi
 
