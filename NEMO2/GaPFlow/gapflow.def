@@ -1,0 +1,682 @@
+# GaPFlow Multi-Stage Build Recipe for NEMO2
+#
+# This recipe creates a minimal runtime container for GaPFlow on NEMO2 (AMD EPYC
+# Milan/Zen3), including an MPI-enabled muGrid and GaPFlow's bundled LAMMPS.
+# The code is compiled for Zen3 (-march=znver3), so it runs on both the Milan
+# (Zen3) and Genoa (Zen4) nodes. It uses multi-stage builds to exclude compilers
+# and development tools from the final image, significantly reducing container
+# size.
+#
+# Build:
+#   apptainer build -F gapflow.sif gapflow.def
+#
+# Usage:
+#   apptainer exec gapflow.sif mpirun -n 1 python3 -m GaPFlow input.yaml
+#   apptainer exec gapflow.sif gpf_info
+#
+# GaPFlow spawns its MD workers via MPI_Comm_spawn, which srun does not
+# support; see %help for details.
+#
+# Note: Do NOT load any MPI module on NEMO2. Slurm handles process management.
+
+######################################################################
+# STAGE 1: BUILD
+# Full development environment with compilers, headers, and build tools
+######################################################################
+
+Bootstrap: docker
+From: ubuntu:24.04
+Stage: build
+
+%arguments
+GAPFLOW_VERSION=1.2.0
+MUGRID_VERSION=1.4.0
+
+# MPI stack versions (same as MACHINES/NEMO2/openmpi-5.0.11_ucx-1.22.0.def)
+AOCC_VERSION=5.2.0
+HWLOC_VERSION=2.14.0
+LIBEVENT_VERSION=2.1.13
+LIBFABRIC_VERSION=2.7.0
+MUNGE_VERSION=0.5.18
+UCX_VERSION=1.22.0
+UCC_VERSION=1.9.0
+PMIX_VERSION=5.0.11
+PRRTE_VERSION=3.0.14
+OMPI_VERSION=5.0.11
+MPI4PY_VERSION=4.1.2
+
+# Library versions
+PNETCDF_VERSION=1.15.1
+
+%post
+    # ================================================================
+    # Configuration from build arguments
+    # ================================================================
+    GAPFLOW_VERSION="{{ GAPFLOW_VERSION }}"
+    MUGRID_VERSION="{{ MUGRID_VERSION }}"
+
+    AOCC_VERSION="{{ AOCC_VERSION }}"
+    HWLOC_VERSION="{{ HWLOC_VERSION }}"
+    LIBEVENT_VERSION="{{ LIBEVENT_VERSION }}"
+    LIBFABRIC_VERSION="{{ LIBFABRIC_VERSION }}"
+    MUNGE_VERSION="{{ MUNGE_VERSION }}"
+    UCX_VERSION="{{ UCX_VERSION }}"
+    UCC_VERSION="{{ UCC_VERSION }}"
+    PMIX_VERSION="{{ PMIX_VERSION }}"
+    PRRTE_VERSION="{{ PRRTE_VERSION }}"
+    OMPI_VERSION="{{ OMPI_VERSION }}"
+    MPI4PY_VERSION="{{ MPI4PY_VERSION }}"
+    PNETCDF_VERSION="{{ PNETCDF_VERSION }}"
+
+    echo "=========================================="
+    echo "GaPFlow Build Configuration:"
+    echo "  GaPFlow Version: ${GAPFLOW_VERSION}"
+    echo "  muGrid Version:  ${MUGRID_VERSION}"
+    echo "  AOCC:            ${AOCC_VERSION}"
+    echo "  OpenMPI:         ${OMPI_VERSION}"
+    echo "  PMIx:            ${PMIX_VERSION}"
+    echo "  UCX:             ${UCX_VERSION}"
+    echo "  UCC:             ${UCC_VERSION}"
+    echo "  PnetCDF:         ${PNETCDF_VERSION}"
+    echo "=========================================="
+
+    # ================================================================
+    # Environment setup
+    # ================================================================
+    # (Avoid trailing colons: an empty entry in LD_LIBRARY_PATH means the
+    # current working directory.)
+    export PATH=/usr/local/bin:$PATH
+    export LD_RUN_PATH=/usr/local/lib${LD_RUN_PATH:+:$LD_RUN_PATH}
+    export LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+    export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}
+    export MANPATH=/usr/local/share/man${MANPATH:+:$MANPATH}
+
+    export DEBIAN_FRONTEND=noninteractive
+    export DEBCONF_NONINTERACTIVE_SEEN=true
+
+    # Private working directory for downloads and source trees. Apptainer
+    # bind-mounts the host's /tmp during builds on NEMO2 ("mount tmp = yes"),
+    # so fixed paths like /tmp/gapflow would collide between concurrent builds.
+    WORKDIR=$(mktemp -d /tmp/gapflow-build.XXXXXX)
+
+    # ================================================================
+    # Install base development packages
+    # ================================================================
+    # Some archive.ubuntu.com mirror addresses are occasionally unreachable;
+    # time out and retry instead of hanging the build indefinitely.
+    printf 'Acquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries "5";\n' \
+        > /etc/apt/apt.conf.d/99-timeouts
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        software-properties-common \
+        strace \
+        libnuma-dev \
+        libibverbs-dev \
+        librdmacm-dev \
+        libssl-dev \
+        curl \
+        wget \
+        git \
+        bash \
+        make \
+        file \
+        pkg-config \
+        gcc \
+        g++ \
+        gfortran \
+        python3-dev \
+        python3-pip \
+        autotools-dev \
+        autoconf \
+        libtool-bin \
+        libncurses-dev \
+        cmake \
+        ca-certificates \
+        bzip2 \
+        xz-utils \
+        automake
+
+    # ================================================================
+    # Install AMD AOCC compiler
+    # ================================================================
+    # The download directory is named after the major.minor version
+    # (aocc-5-2 for 5.2.0). apt resolves the package dependencies, dpkg -i
+    # does not.
+    cd ${WORKDIR}
+    curl -fsSL -o aocc-compiler-${AOCC_VERSION}_1_amd64.deb \
+        https://download.amd.com/developer/eula/aocc/aocc-$(echo ${AOCC_VERSION} | cut -d. -f1-2 | tr . -)/aocc-compiler-${AOCC_VERSION}_1_amd64.deb
+    apt-get install -y --no-install-recommends ./aocc-compiler-${AOCC_VERSION}_1_amd64.deb
+    rm aocc-compiler-${AOCC_VERSION}_1_amd64.deb
+
+    # Configure AOCC environment
+    . /opt/AMD/aocc-compiler-${AOCC_VERSION}/setenv_AOCC.sh
+    export CC=clang
+    export CXX=clang++
+    export FC=flang
+
+    # Optimization flags for Milan (Zen3)
+    export OPT_FLAGS="-O3 -march=znver3"
+    export CFLAGS="${OPT_FLAGS}"
+    export CXXFLAGS="${OPT_FLAGS}"
+    export FFLAGS="${OPT_FLAGS}"
+    export FCFLAGS="${OPT_FLAGS}"
+
+    # ================================================================
+    # Build HWLOC
+    # ================================================================
+    echo "Building HWLOC ${HWLOC_VERSION}..."
+    rm -rf ${WORKDIR}/hwloc-${HWLOC_VERSION}
+    curl -fsSL https://download.open-mpi.org/release/hwloc/v${HWLOC_VERSION%.*}/hwloc-${HWLOC_VERSION}.tar.bz2 | tar --no-same-owner -xjC ${WORKDIR}
+    cd ${WORKDIR}/hwloc-${HWLOC_VERSION}
+    ./configure --prefix=/usr/local
+    make -j$(nproc)
+    make install
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/hwloc-${HWLOC_VERSION}
+
+    # ================================================================
+    # Build libfabric
+    # ================================================================
+    echo "Building libfabric ${LIBFABRIC_VERSION}..."
+    rm -rf ${WORKDIR}/libfabric-${LIBFABRIC_VERSION}
+    curl -fsSL https://github.com/ofiwg/libfabric/releases/download/v${LIBFABRIC_VERSION}/libfabric-${LIBFABRIC_VERSION}.tar.bz2 | tar --no-same-owner -xjC ${WORKDIR}
+    cd ${WORKDIR}/libfabric-${LIBFABRIC_VERSION}
+    ./configure --prefix=/usr/local \
+        --disable-efa \
+        --enable-tcp \
+        --enable-shm \
+        --enable-verbs
+    make -j$(nproc)
+    make install
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/libfabric-${LIBFABRIC_VERSION}
+
+    # ================================================================
+    # Build MUNGE
+    # ================================================================
+    echo "Building MUNGE ${MUNGE_VERSION}..."
+    rm -rf ${WORKDIR}/munge-${MUNGE_VERSION}
+    curl -fsSL https://github.com/dun/munge/releases/download/munge-${MUNGE_VERSION}/munge-${MUNGE_VERSION}.tar.xz | tar --no-same-owner -xJC ${WORKDIR}
+    cd ${WORKDIR}/munge-${MUNGE_VERSION}
+    ./configure --prefix=/usr/local
+    make -j$(nproc)
+    make install
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/munge-${MUNGE_VERSION}
+
+    # ================================================================
+    # Build libevent
+    # ================================================================
+    echo "Building libevent ${LIBEVENT_VERSION}..."
+    rm -rf ${WORKDIR}/libevent-${LIBEVENT_VERSION}-stable
+    curl -fsSL https://github.com/libevent/libevent/releases/download/release-${LIBEVENT_VERSION}-stable/libevent-${LIBEVENT_VERSION}-stable.tar.gz | tar --no-same-owner -xzC ${WORKDIR}
+    cd ${WORKDIR}/libevent-${LIBEVENT_VERSION}-stable
+    ./configure --prefix=/usr/local
+    make -j$(nproc)
+    make install
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/libevent-${LIBEVENT_VERSION}-stable
+
+    # ================================================================
+    # Build UCX
+    # ================================================================
+    echo "Building UCX ${UCX_VERSION}..."
+    rm -rf ${WORKDIR}/ucx-${UCX_VERSION}
+    curl -fsSL https://github.com/openucx/ucx/releases/download/v${UCX_VERSION}/ucx-${UCX_VERSION}.tar.gz | tar --no-same-owner -xzC ${WORKDIR}
+    cd ${WORKDIR}/ucx-${UCX_VERSION}
+    CFLAGS="${CFLAGS} -Wno-unused-but-set-variable" \
+    CXXFLAGS="${CXXFLAGS} -Wno-unused-but-set-variable" \
+    ./configure --prefix=/usr/local \
+        --enable-optimizations \
+        --enable-cma \
+        --enable-mt \
+        --with-verbs \
+        --with-rdmacm \
+        --without-java \
+        --without-go \
+        --disable-doxygen-doc \
+        --disable-logging \
+        --disable-debug \
+        --disable-assertions \
+        --disable-params-check
+    make -j$(nproc)
+    make install
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/ucx-${UCX_VERSION}
+
+    # ================================================================
+    # Build UCC
+    # ================================================================
+    echo "Building UCC ${UCC_VERSION}..."
+    ldconfig
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/ucc-${UCC_VERSION}
+    curl -fsSL https://github.com/openucx/ucc/archive/refs/tags/v${UCC_VERSION}.tar.gz | tar --no-same-owner -xzC ${WORKDIR}
+    cd ${WORKDIR}/ucc-${UCC_VERSION}
+    ./autogen.sh
+    ./configure --prefix=/usr/local --with-ucx=/usr/local
+    make -j$(nproc)
+    make install
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/ucc-${UCC_VERSION}
+
+    # ================================================================
+    # Build PMIx
+    # ================================================================
+    echo "Building PMIx ${PMIX_VERSION}..."
+    rm -rf ${WORKDIR}/pmix-${PMIX_VERSION}
+    curl -fsSL https://github.com/openpmix/openpmix/releases/download/v${PMIX_VERSION}/pmix-${PMIX_VERSION}.tar.bz2 | tar --no-same-owner -xjC ${WORKDIR}
+    cd ${WORKDIR}/pmix-${PMIX_VERSION}
+    ./configure --prefix=/usr/local --with-libevent=/usr/local --with-hwloc=/usr/local --with-munge=/usr/local
+    make -j$(nproc)
+    make install
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/pmix-${PMIX_VERSION}
+
+    # ================================================================
+    # Build PRRTE
+    # ================================================================
+    echo "Building PRRTE ${PRRTE_VERSION}..."
+    rm -rf ${WORKDIR}/prrte-${PRRTE_VERSION}
+    curl -fsSL https://github.com/openpmix/prrte/releases/download/v${PRRTE_VERSION}/prrte-${PRRTE_VERSION}.tar.bz2 | tar --no-same-owner -xjC ${WORKDIR}
+    cd ${WORKDIR}/prrte-${PRRTE_VERSION}
+    ./configure --prefix=/usr/local --with-libevent=/usr/local --with-hwloc=/usr/local --with-pmix=/usr/local
+    make -j$(nproc)
+    make install
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/prrte-${PRRTE_VERSION}
+
+    # ================================================================
+    # Build OpenMPI
+    # ================================================================
+    # ORTE and the verbs/openib BTL no longer exist in Open MPI 5, hence no
+    # --without-orte/--without-verbs. InfiniBand is driven through UCX.
+    echo "Building OpenMPI ${OMPI_VERSION}..."
+    rm -rf ${WORKDIR}/openmpi-${OMPI_VERSION}
+    curl -fsSL https://download.open-mpi.org/release/open-mpi/v${OMPI_VERSION%.*}/openmpi-${OMPI_VERSION}.tar.bz2 | tar --no-same-owner -xjC ${WORKDIR}
+    cd ${WORKDIR}/openmpi-${OMPI_VERSION}
+    ./configure --prefix=/usr/local \
+        --enable-shared \
+        --disable-oshmem \
+        --without-psm2 \
+        --with-hwloc=/usr/local \
+        --with-libevent=/usr/local \
+        --with-ofi=/usr/local \
+        --with-ucx=/usr/local \
+        --with-ucc=/usr/local \
+        --with-pmix=/usr/local \
+        --with-prrte=/usr/local
+    make -j$(nproc)
+    make install
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/openmpi-${OMPI_VERSION}
+
+    # ================================================================
+    # Build PnetCDF
+    # ================================================================
+    echo "Building PnetCDF ${PNETCDF_VERSION}..."
+    rm -rf ${WORKDIR}/pnetcdf-${PNETCDF_VERSION}
+    curl -fsSL https://parallel-netcdf.github.io/Release/pnetcdf-${PNETCDF_VERSION}.tar.gz | tar --no-same-owner -xzC ${WORKDIR}
+    cd ${WORKDIR}/pnetcdf-${PNETCDF_VERSION}
+    # configure pastes the first line of `mpicc --version` (and of mpicxx etc.)
+    # verbatim into the compile command of the pnetcdf_version utility. AOCC's
+    # version string contains a '#' (AOCC_x.y.z-Build#NNN), which make treats
+    # as a comment, leaving an unterminated quote that breaks the build. The
+    # strings are purely informational, so replace them before configure.
+    sed -i -E "s/@MPI[A-Z0-9]+_BASE_VERSION@/AOCC ${AOCC_VERSION}/g" src/utils/pnetcdf_version/Makefile.in
+    # --disable-gio: PnetCDF >= 1.15 builds its GIO library as a subproject
+    # by default but then does not install gio.pc, while pnetcdf.pc still has
+    # "Requires: gio". `pkg-config pnetcdf` then fails and muGrid silently
+    # builds without NetCDF support. muGrid does not use GIO.
+    ./configure --prefix=/usr/local \
+        --enable-shared \
+        --disable-fortran \
+        --disable-gio \
+        MPICC=/usr/local/bin/mpicc \
+        MPICXX=/usr/local/bin/mpicxx
+    make -j$(nproc)
+    make install
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/pnetcdf-${PNETCDF_VERSION}
+    # muGrid finds PnetCDF through pkg-config; fail here rather than later
+    pkg-config --modversion pnetcdf
+
+    # ================================================================
+    # Install Python packages
+    # ================================================================
+    echo "Installing Python packages..."
+    cd ${WORKDIR}
+    pip install --break-system-packages --no-cache-dir \
+        numpy \
+        scipy \
+        pybind11 \
+        muTimer
+
+    # Install mpi4py (compile from source to use our MPI)
+    pip install --break-system-packages --no-cache-dir --no-binary mpi4py mpi4py==${MPI4PY_VERSION}
+
+    # Install NuMPI
+    pip install --break-system-packages --no-cache-dir NuMPI
+
+    # ================================================================
+    # Build GaPFlow
+    # ================================================================
+    # Built from source because the bundled LAMMPS must link against our MPI
+    # (needs cmake, hence the build stage).
+    #
+    # --ignore-installed: some dependencies (e.g. pyparsing, six) are already
+    # provided by apt in /usr/lib/python3/dist-packages, which pip would treat
+    # as satisfied. That directory is not copied to the runtime image, so force
+    # all dependencies into /usr/local where the staging step picks them up.
+    echo "Building GaPFlow..."
+    pip install --break-system-packages --no-cache-dir --ignore-installed \
+        --no-binary GaPFlow GaPFlow==${GAPFLOW_VERSION}
+
+    # GaPFlow depends on muGrid, so pip pulled in the PyPI wheel (no MPI, no
+    # PnetCDF). Remove it; the muGrid build below installs the proper one.
+    pip uninstall --break-system-packages -y muGrid
+
+    # ================================================================
+    # Build muGrid
+    # ================================================================
+    echo "Building muGrid ${MUGRID_VERSION}..."
+
+    export MUGRID_SRC_DIR=${WORKDIR}/mugrid
+    export MUGRID_BUILD_DIR=${WORKDIR}/mugrid-build
+
+    rm -rf ${MUGRID_SRC_DIR} ${MUGRID_BUILD_DIR}
+    git clone --recurse-submodules -b ${MUGRID_VERSION} \
+        https://github.com/muSpectre/muGrid.git ${MUGRID_SRC_DIR}
+
+    mkdir -p ${MUGRID_BUILD_DIR}
+    cd ${MUGRID_BUILD_DIR}
+
+    # With MPI enabled muGrid uses PnetCDF for parallel file I/O. FFTW is not
+    # needed at all: muGrid uses the bundled pocketfft.
+    cmake ${MUGRID_SRC_DIR} \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_FLAGS="${OPT_FLAGS}" \
+        -DCMAKE_CXX_FLAGS="${OPT_FLAGS}" \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_PREFIX_PATH=/usr/local \
+        -Dpybind11_DIR=$(python3 -m pybind11 --cmakedir) \
+        -DMUGRID_ENABLE_MPI=ON \
+        -DMUGRID_ENABLE_NETCDF=ON \
+        -DMUGRID_ENABLE_PYTHON=ON \
+        -DMUGRID_ENABLE_TESTS=OFF \
+        -DMUGRID_ENABLE_EXAMPLES=OFF
+
+    make -j$(nproc)
+    make install
+
+    # muGrid's CMake install puts the Python package into the interpreter's
+    # platlib (/usr/lib/python3/dist-packages on Ubuntu). Move it below
+    # /usr/local so the staging step picks it up and the runtime image finds it
+    # via PYTHONPATH.
+    PY_PLATLIB=$(python3 -c "import sysconfig; print(sysconfig.get_path('platlib'))")
+    PY_DEST=$(python3 -c "import sys; print(f'/usr/local/lib/python{sys.version_info.major}.{sys.version_info.minor}/dist-packages')")
+    if [ "${PY_PLATLIB}" != "${PY_DEST}" ] && [ -d "${PY_PLATLIB}/muGrid" ]; then
+        mkdir -p ${PY_DEST}
+        cp -a ${PY_PLATLIB}/muGrid ${PY_DEST}/
+        rm -rf ${PY_PLATLIB}/muGrid
+    fi
+
+    # Fail the build here (rather than in %test) if the bindings are unusable
+    # or were configured with the wrong backends.
+    python3 -c "import muGrid; print('muGrid', muGrid.__version__, muGrid.netcdf_backend, muGrid.netcdf_version)"
+    python3 -c "import muGrid; assert muGrid.has_mpi, 'MPI support is missing'"
+    python3 -c "import muGrid; assert muGrid.has_netcdf, 'NetCDF I/O is missing'"
+    python3 -c "import GaPFlow; print('GaPFlow', GaPFlow.__version__)"
+
+    cd / && rm -rf ${WORKDIR}
+
+    # ================================================================
+    # Prepare staging area with only runtime files
+    # ================================================================
+    echo "Preparing staging area..."
+    mkdir -p /staging/usr/local/lib
+    mkdir -p /staging/usr/local/bin
+    mkdir -p /staging/usr/local/include
+    mkdir -p /staging/usr/local/share
+    mkdir -p /staging/etc
+
+    # -------------------------------
+    # Copy all shared libraries from /usr/local/lib
+    # -------------------------------
+    # Top level only: the plugin directories are copied as a whole below, and
+    # the Python extension modules come with the python3* directory.
+    find /usr/local/lib -maxdepth 1 -name "*.so*" -type f -exec cp -a {} /staging/usr/local/lib/ \;
+    find /usr/local/lib -maxdepth 1 -name "*.so*" -type l -exec cp -a {} /staging/usr/local/lib/ \;
+
+    # Copy plugin directories (UCX, UCC, OpenMPI, PMIx, PRRTE, libfabric)
+    cp -a /usr/local/lib/ucx /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /usr/local/lib/ucc /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /usr/local/lib/openmpi /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /usr/local/lib/pmix /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /usr/local/lib/prte /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /usr/local/lib/libfabric /staging/usr/local/lib/ 2>/dev/null || true
+
+    # AOCC runtime libraries (compiler runtimes)
+    cp -a /opt/AMD/aocc-compiler-*/lib/libflang*.so* /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /opt/AMD/aocc-compiler-*/lib/libFortran*.so* /staging/usr/local/lib/ 2>/dev/null || true
+    # Not libomp*: that also matches the libomptarget* offload plugins, which
+    # need LLVM/ROCm libraries that are not in the runtime image. libompstub is
+    # needed by the Fortran MPI bindings.
+    cp -a /opt/AMD/aocc-compiler-*/lib/libomp.so* /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /opt/AMD/aocc-compiler-*/lib/libompstub.so* /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /opt/AMD/aocc-compiler-*/lib/libamdlibm*.so* /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /opt/AMD/aocc-compiler-*/lib/libpgmath*.so* /staging/usr/local/lib/ 2>/dev/null || true
+
+    # Python packages
+    cp -a /usr/local/lib/python3* /staging/usr/local/lib/
+
+    # Console scripts installed by pip (gpf_info and friends, moltemplate.sh
+    # which GaPFlow calls via subprocess, ...). Taken from the packages'
+    # RECORD files so the compilers and MPI wrappers in /usr/local/bin are
+    # left behind.
+    python3 - << 'EOF'
+import csv, glob, os, shutil
+for rec in glob.glob('/usr/local/lib/python3*/dist-packages/*.dist-info/RECORD'):
+    base = os.path.dirname(os.path.dirname(rec))
+    with open(rec) as fh:
+        for row in csv.reader(fh):
+            p = os.path.normpath(os.path.join(base, row[0]))
+            if os.path.dirname(p) == '/usr/local/bin' and os.path.isfile(p):
+                shutil.copy2(p, '/staging/usr/local/bin/')
+EOF
+
+    # MPI binaries. In Open MPI 5 mpirun/mpiexec are symlinks to PRRTE's
+    # prterun, so the PRRTE launcher and daemon must be copied as well.
+    cp -a /usr/local/bin/mpirun /staging/usr/local/bin/ 2>/dev/null || true
+    cp -a /usr/local/bin/mpiexec /staging/usr/local/bin/ 2>/dev/null || true
+    cp -a /usr/local/bin/prte* /staging/usr/local/bin/ 2>/dev/null || true
+    cp -a /usr/local/bin/ompi* /staging/usr/local/bin/ 2>/dev/null || true
+    cp -a /usr/local/bin/pmix_info /staging/usr/local/bin/ 2>/dev/null || true
+    cp -a /usr/local/bin/ucx_info /staging/usr/local/bin/ 2>/dev/null || true
+    cp -a /usr/local/bin/ucc_info /staging/usr/local/bin/ 2>/dev/null || true
+    cp -a /usr/local/bin/fi_info /staging/usr/local/bin/ 2>/dev/null || true
+
+    # MPI/HPC data files (help messages, MCA parameter defaults)
+    cp -a /usr/local/share/openmpi /staging/usr/local/share/ 2>/dev/null || true
+    cp -a /usr/local/share/pmix /staging/usr/local/share/ 2>/dev/null || true
+    cp -a /usr/local/share/prte /staging/usr/local/share/ 2>/dev/null || true
+    cp -a /usr/local/share/hwloc /staging/usr/local/share/ 2>/dev/null || true
+    cp -a /usr/local/etc /staging/usr/local/ 2>/dev/null || true
+
+    # C++ development files for downstream builds (muGrid is a static library)
+    cp -a /usr/local/lib/libmuGrid.a /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /usr/local/include/libmugrid /staging/usr/local/include/ 2>/dev/null || true
+    mkdir -p /staging/usr/local/lib/cmake
+    cp -a /usr/local/lib/cmake/muGrid /staging/usr/local/lib/cmake/ 2>/dev/null || true
+
+    # System runtime libraries (InfiniBand, NUMA, Fortran, ...) are installed
+    # from the Ubuntu archive in the runtime stage.
+
+    # -------------------------------
+    # Build info
+    # -------------------------------
+    cat > /staging/etc/gapflow-build-info << EOF
+GAPFLOW_VERSION=${GAPFLOW_VERSION}
+MUGRID_VERSION=${MUGRID_VERSION}
+AOCC_VERSION=${AOCC_VERSION}
+OMPI_VERSION=${OMPI_VERSION}
+PMIX_VERSION=${PMIX_VERSION}
+PRRTE_VERSION=${PRRTE_VERSION}
+UCX_VERSION=${UCX_VERSION}
+UCC_VERSION=${UCC_VERSION}
+LIBFABRIC_VERSION=${LIBFABRIC_VERSION}
+HWLOC_VERSION=${HWLOC_VERSION}
+MPI4PY_VERSION=${MPI4PY_VERSION}
+PNETCDF_VERSION=${PNETCDF_VERSION}
+BUILD_DATE=$(date -Iseconds)
+TARGET_ARCH=znver3
+EOF
+
+    echo "=========================================="
+    echo "Staging area summary:"
+    du -sh /staging/*
+    echo "=========================================="
+
+
+######################################################################
+# STAGE 2: RUNTIME
+# Minimal Ubuntu container with only essential runtime components
+######################################################################
+
+Bootstrap: docker
+From: ubuntu:24.04
+Stage: runtime
+
+%arguments
+GAPFLOW_VERSION=1.2.0
+MUGRID_VERSION=1.4.0
+
+%files from build
+    /staging/usr/local/ /usr/local
+    /staging/etc/gapflow-build-info /etc/gapflow-build-info
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+
+    # ================================================================
+    # Install only essential runtime packages
+    # ================================================================
+    # Some archive.ubuntu.com mirror addresses are occasionally unreachable;
+    # time out and retry instead of hanging the build indefinitely.
+    printf 'Acquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries "5";\n' \
+        > /etc/apt/apt.conf.d/99-timeouts
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        libstdc++6 \
+        libgcc-s1 \
+        libc6 \
+        zlib1g \
+        liblzma5 \
+        libffi8 \
+        libatomic1 \
+        libgomp1 \
+        libgfortran5 \
+        libquadmath0 \
+        libnuma1 \
+        libibverbs1 \
+        librdmacm1t64 \
+        ibverbs-providers \
+        ca-certificates
+
+    # Install Python packages that need to be present in runtime
+    pip install --break-system-packages --no-cache-dir numpy scipy muTimer
+
+    # Do NOT pip install mpi4py here: the PyPI wheels ship their own bundled
+    # MPI, which would shadow the container's OpenMPI and break the PMIx
+    # handshake with Slurm. The build stage compiled mpi4py against our MPI and
+    # the staging step copied it into dist-packages.
+
+    # Install NuMPI
+    pip install --break-system-packages --no-cache-dir NuMPI
+
+    # ================================================================
+    # Cleanup to minimize image size
+    # ================================================================
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+    rm -rf /usr/share/doc /usr/share/man /usr/share/info
+    rm -rf /var/cache/apt/archives
+
+    # ================================================================
+    # Configure library paths
+    # ================================================================
+    cat > /etc/ld.so.conf.d/gapflow.conf << 'EOF'
+/usr/local/lib
+EOF
+
+    ldconfig
+
+%environment
+    export PATH=/usr/local/bin:$PATH
+    export LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+    export PYTHONPATH=/usr/local/lib/python3.12/dist-packages${PYTHONPATH:+:$PYTHONPATH}
+    export OPAL_PREFIX=/usr/local
+    export LC_ALL=C
+    export PYTHONUNBUFFERED=1
+    # Don't load modules from $HOME/.local (which is bind-mounted from the host)
+    export PYTHONNOUSERSITE=1
+
+%runscript
+    exec python3 "$@"
+
+%test
+    python3 -c "import numpy; print('NumPy:', numpy.__version__)"
+    python3 -c "import scipy; print('SciPy:', scipy.__version__)"
+    python3 -c "import mpi4py; print('mpi4py:', mpi4py.__version__)"
+    python3 -c "import muGrid; print('muGrid:', muGrid.__version__)"
+    python3 -c "import muGrid; print(muGrid.version_string())"
+    python3 -c "import muGrid; assert muGrid.has_mpi, 'MPI support is missing'"
+    python3 -c "import muGrid; assert muGrid.netcdf_backend == 'PnetCDF', muGrid.netcdf_backend"
+
+    export MPLCONFIGDIR=$(mktemp -d)
+    python3 -c "import GaPFlow; print('GaPFlow:', GaPFlow.__version__)"
+    gpf_info
+    command -v moltemplate.sh
+
+    ompi_info --version
+
+%help
+    GaPFlow - Gap-averaged flow simulations for NEMO2
+    =================================================
+
+    This container provides GaPFlow compiled for AMD EPYC Milan/Zen3 (NEMO2).
+    Multi-stage build for minimal container size.
+
+    Build info: /etc/gapflow-build-info
+
+    Features:
+      - GaPFlow with bundled LAMMPS (linked against the container's MPI)
+      - muGrid with MPI and PnetCDF support
+      - OpenMPI 5.0 with UCX transport (see build info for exact versions)
+      - PnetCDF for parallel I/O
+      - NuMPI for parallel algorithms
+      - pocketfft (bundled with muGrid) for FFTs
+
+    Usage:
+      # Run a GaPFlow simulation with parallel MD (Slurm batch job)
+      #SBATCH --nodes=1
+      #SBATCH --ntasks=9    # 1 GaPFlow process + num_worker (here 8) workers
+      apptainer exec gapflow.sif mpirun -n 1 python3 -m GaPFlow input.yaml
+
+      # Run an MPI-parallel Python script that does not spawn processes
+      srun apptainer run gapflow.sif script.py
+
+      # Show GaPFlow (and dependency) versions
+      apptainer exec gapflow.sif gpf_info
+
+      # Interactive Python
+      apptainer exec gapflow.sif python3
+
+    Note: Do NOT load any MPI module on NEMO2. Slurm handles process
+    management via PMIx.
+
+    Note on parallel MD: GaPFlow runs as a single process and starts its
+    LAMMPS workers with MPI_Comm_spawn. Slurm's PMIx (srun) does not support
+    spawning, so launch GaPFlow with the container's mpirun and WITHOUT srun,
+    as shown above. Request at least num_worker + 1 tasks. This works within 
+    a single node only (mpirun cannot use srun from inside the container to
+    reach other nodes).
+
+%labels
+    Author Pastewka Lab
+    Version {{ GAPFLOW_VERSION }}
+    muGridVersion {{ MUGRID_VERSION }}
+    Description GaPFlow for NEMO2 (Milan/Zen3) - minimal runtime container
