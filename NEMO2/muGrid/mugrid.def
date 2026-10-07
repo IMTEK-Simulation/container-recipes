@@ -1,8 +1,10 @@
 # muGrid Multi-Stage Build Recipe for NEMO2
 #
 # This recipe creates a minimal runtime container for muGrid on NEMO2 (AMD EPYC Milan/Zen3).
-# It uses multi-stage builds to exclude compilers and development tools from the
-# final image, significantly reducing container size.
+# The code is compiled for Zen3 (-march=znver3), so it runs on both the Milan
+# (Zen3) and Genoa (Zen4) nodes. It uses multi-stage builds to exclude compilers
+# and development tools from the final image, significantly reducing container
+# size.
 #
 # Build:
 #   apptainer build -F mugrid.sif mugrid.def
@@ -25,21 +27,21 @@ Stage: build
 %arguments
 MUGRID_VERSION=1.4.0
 
-# MPI stack versions (matched to NEMO2)
-AOCC_VERSION=5.0.0
-HWLOC_VERSION=2.10.0
-LIBEVENT_VERSION=2.1.12
-LIBFABRIC_VERSION=1.21.0
-MUNGE_VERSION=0.5.13
-UCX_VERSION=1.16.0
-UCC_VERSION=1.3.0
-PMIX_VERSION=5.0.7
-PRRTE_VERSION=3.0.5
-OMPI_VERSION=5.0.7
-MPI4PY_VERSION=4.0.3
+# MPI stack versions (same as MACHINES/NEMO2/openmpi-5.0.11_ucx-1.22.0.def)
+AOCC_VERSION=5.2.0
+HWLOC_VERSION=2.14.0
+LIBEVENT_VERSION=2.1.13
+LIBFABRIC_VERSION=2.7.0
+MUNGE_VERSION=0.5.18
+UCX_VERSION=1.22.0
+UCC_VERSION=1.9.0
+PMIX_VERSION=5.0.11
+PRRTE_VERSION=3.0.14
+OMPI_VERSION=5.0.11
+MPI4PY_VERSION=4.1.2
 
 # Library versions
-PNETCDF_VERSION=1.14.0
+PNETCDF_VERSION=1.15.1
 
 %post
     # ================================================================
@@ -63,25 +65,41 @@ PNETCDF_VERSION=1.14.0
     echo "=========================================="
     echo "muGrid Build Configuration:"
     echo "  muGrid Version:  ${MUGRID_VERSION}"
+    echo "  AOCC:            ${AOCC_VERSION}"
     echo "  OpenMPI:         ${OMPI_VERSION}"
+    echo "  PMIx:            ${PMIX_VERSION}"
+    echo "  UCX:             ${UCX_VERSION}"
+    echo "  UCC:             ${UCC_VERSION}"
     echo "  PnetCDF:         ${PNETCDF_VERSION}"
     echo "=========================================="
 
     # ================================================================
     # Environment setup
     # ================================================================
+    # (Avoid trailing colons: an empty entry in LD_LIBRARY_PATH means the
+    # current working directory.)
     export PATH=/usr/local/bin:$PATH
-    export LD_RUN_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-    export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-    export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
-    export MANPATH=/usr/local/share/man:$MANPATH
+    export LD_RUN_PATH=/usr/local/lib${LD_RUN_PATH:+:$LD_RUN_PATH}
+    export LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+    export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}
+    export MANPATH=/usr/local/share/man${MANPATH:+:$MANPATH}
 
     export DEBIAN_FRONTEND=noninteractive
     export DEBCONF_NONINTERACTIVE_SEEN=true
 
+    # Private working directory for downloads and source trees. Apptainer
+    # bind-mounts the host's /tmp during builds on NEMO2 ("mount tmp = yes"),
+    # so fixed paths like /tmp/mugrid would collide between concurrent builds.
+    WORKDIR=$(mktemp -d /tmp/mugrid-build.XXXXXX)
+
     # ================================================================
     # Install base development packages
     # ================================================================
+    # Some archive.ubuntu.com mirror addresses are occasionally unreachable;
+    # time out and retry instead of hanging the build indefinitely.
+    printf 'Acquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries "5";\n' \
+        > /etc/apt/apt.conf.d/99-timeouts
+
     apt-get update
     apt-get install -y --no-install-recommends \
         software-properties-common \
@@ -105,20 +123,23 @@ PNETCDF_VERSION=1.14.0
         autotools-dev \
         autoconf \
         libtool-bin \
-        libncurses5-dev \
+        libncurses-dev \
         cmake \
         ca-certificates \
         bzip2 \
         xz-utils \
-        automake \
-        libboost-test-dev
+        automake
 
     # ================================================================
-    # Install AMD AOCC compiler (optimized for Zen4)
+    # Install AMD AOCC compiler
     # ================================================================
-    cd /tmp
-    wget -q https://download.amd.com/developer/eula/aocc/aocc-5-0/aocc-compiler-${AOCC_VERSION}_1_amd64.deb
-    dpkg -i aocc-compiler-${AOCC_VERSION}_1_amd64.deb
+    # The download directory is named after the major.minor version
+    # (aocc-5-2 for 5.2.0). apt resolves the package dependencies, dpkg -i
+    # does not.
+    cd ${WORKDIR}
+    curl -fsSL -o aocc-compiler-${AOCC_VERSION}_1_amd64.deb \
+        https://download.amd.com/developer/eula/aocc/aocc-$(echo ${AOCC_VERSION} | cut -d. -f1-2 | tr . -)/aocc-compiler-${AOCC_VERSION}_1_amd64.deb
+    apt-get install -y --no-install-recommends ./aocc-compiler-${AOCC_VERSION}_1_amd64.deb
     rm aocc-compiler-${AOCC_VERSION}_1_amd64.deb
 
     # Configure AOCC environment
@@ -132,26 +153,27 @@ PNETCDF_VERSION=1.14.0
     export CFLAGS="${OPT_FLAGS}"
     export CXXFLAGS="${OPT_FLAGS}"
     export FFLAGS="${OPT_FLAGS}"
+    export FCFLAGS="${OPT_FLAGS}"
 
     # ================================================================
     # Build HWLOC
     # ================================================================
     echo "Building HWLOC ${HWLOC_VERSION}..."
-    rm -rf /tmp/hwloc-${HWLOC_VERSION}
-    curl -sL https://download.open-mpi.org/release/hwloc/v2.10/hwloc-${HWLOC_VERSION}.tar.bz2 | tar --no-same-owner -xjC /tmp
-    cd /tmp/hwloc-${HWLOC_VERSION}
+    rm -rf ${WORKDIR}/hwloc-${HWLOC_VERSION}
+    curl -fsSL https://download.open-mpi.org/release/hwloc/v${HWLOC_VERSION%.*}/hwloc-${HWLOC_VERSION}.tar.bz2 | tar --no-same-owner -xjC ${WORKDIR}
+    cd ${WORKDIR}/hwloc-${HWLOC_VERSION}
     ./configure --prefix=/usr/local
     make -j$(nproc)
     make install
-    rm -rf /tmp/hwloc-${HWLOC_VERSION}
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/hwloc-${HWLOC_VERSION}
 
     # ================================================================
     # Build libfabric
     # ================================================================
     echo "Building libfabric ${LIBFABRIC_VERSION}..."
-    rm -rf /tmp/libfabric-${LIBFABRIC_VERSION}
-    curl -sL https://github.com/ofiwg/libfabric/releases/download/v${LIBFABRIC_VERSION}/libfabric-${LIBFABRIC_VERSION}.tar.bz2 | tar --no-same-owner -xjC /tmp
-    cd /tmp/libfabric-${LIBFABRIC_VERSION}
+    rm -rf ${WORKDIR}/libfabric-${LIBFABRIC_VERSION}
+    curl -fsSL https://github.com/ofiwg/libfabric/releases/download/v${LIBFABRIC_VERSION}/libfabric-${LIBFABRIC_VERSION}.tar.bz2 | tar --no-same-owner -xjC ${WORKDIR}
+    cd ${WORKDIR}/libfabric-${LIBFABRIC_VERSION}
     ./configure --prefix=/usr/local \
         --disable-efa \
         --enable-tcp \
@@ -159,39 +181,39 @@ PNETCDF_VERSION=1.14.0
         --enable-verbs
     make -j$(nproc)
     make install
-    rm -rf /tmp/libfabric-${LIBFABRIC_VERSION}
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/libfabric-${LIBFABRIC_VERSION}
 
     # ================================================================
     # Build MUNGE
     # ================================================================
     echo "Building MUNGE ${MUNGE_VERSION}..."
-    rm -rf /tmp/munge-${MUNGE_VERSION}
-    curl -sL https://github.com/dun/munge/releases/download/munge-${MUNGE_VERSION}/munge-${MUNGE_VERSION}.tar.xz | tar --no-same-owner -xJC /tmp
-    cd /tmp/munge-${MUNGE_VERSION}
+    rm -rf ${WORKDIR}/munge-${MUNGE_VERSION}
+    curl -fsSL https://github.com/dun/munge/releases/download/munge-${MUNGE_VERSION}/munge-${MUNGE_VERSION}.tar.xz | tar --no-same-owner -xJC ${WORKDIR}
+    cd ${WORKDIR}/munge-${MUNGE_VERSION}
     ./configure --prefix=/usr/local
     make -j$(nproc)
     make install
-    rm -rf /tmp/munge-${MUNGE_VERSION}
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/munge-${MUNGE_VERSION}
 
     # ================================================================
     # Build libevent
     # ================================================================
     echo "Building libevent ${LIBEVENT_VERSION}..."
-    rm -rf /tmp/libevent-${LIBEVENT_VERSION}-stable
-    curl -sL https://github.com/libevent/libevent/releases/download/release-${LIBEVENT_VERSION}-stable/libevent-${LIBEVENT_VERSION}-stable.tar.gz | tar --no-same-owner -xzC /tmp
-    cd /tmp/libevent-${LIBEVENT_VERSION}-stable
+    rm -rf ${WORKDIR}/libevent-${LIBEVENT_VERSION}-stable
+    curl -fsSL https://github.com/libevent/libevent/releases/download/release-${LIBEVENT_VERSION}-stable/libevent-${LIBEVENT_VERSION}-stable.tar.gz | tar --no-same-owner -xzC ${WORKDIR}
+    cd ${WORKDIR}/libevent-${LIBEVENT_VERSION}-stable
     ./configure --prefix=/usr/local
     make -j$(nproc)
     make install
-    rm -rf /tmp/libevent-${LIBEVENT_VERSION}-stable
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/libevent-${LIBEVENT_VERSION}-stable
 
     # ================================================================
     # Build UCX
     # ================================================================
     echo "Building UCX ${UCX_VERSION}..."
-    rm -rf /tmp/ucx-${UCX_VERSION}
-    curl -sL https://github.com/openucx/ucx/releases/download/v${UCX_VERSION}/ucx-${UCX_VERSION}.tar.gz | tar --no-same-owner -xzC /tmp
-    cd /tmp/ucx-${UCX_VERSION}
+    rm -rf ${WORKDIR}/ucx-${UCX_VERSION}
+    curl -fsSL https://github.com/openucx/ucx/releases/download/v${UCX_VERSION}/ucx-${UCX_VERSION}.tar.gz | tar --no-same-owner -xzC ${WORKDIR}
+    cd ${WORKDIR}/ucx-${UCX_VERSION}
     CFLAGS="${CFLAGS} -Wno-unused-but-set-variable" \
     CXXFLAGS="${CXXFLAGS} -Wno-unused-but-set-variable" \
     ./configure --prefix=/usr/local \
@@ -199,6 +221,7 @@ PNETCDF_VERSION=1.14.0
         --enable-cma \
         --enable-mt \
         --with-verbs \
+        --with-rdmacm \
         --without-java \
         --without-go \
         --disable-doxygen-doc \
@@ -208,58 +231,58 @@ PNETCDF_VERSION=1.14.0
         --disable-params-check
     make -j$(nproc)
     make install
-    rm -rf /tmp/ucx-${UCX_VERSION}
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/ucx-${UCX_VERSION}
 
     # ================================================================
     # Build UCC
     # ================================================================
     echo "Building UCC ${UCC_VERSION}..."
     ldconfig
-    rm -rf /tmp/ucc-${UCC_VERSION}
-    curl -sL https://github.com/openucx/ucc/archive/refs/tags/v${UCC_VERSION}.tar.gz | tar --no-same-owner -xzC /tmp
-    cd /tmp/ucc-${UCC_VERSION}
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/ucc-${UCC_VERSION}
+    curl -fsSL https://github.com/openucx/ucc/archive/refs/tags/v${UCC_VERSION}.tar.gz | tar --no-same-owner -xzC ${WORKDIR}
+    cd ${WORKDIR}/ucc-${UCC_VERSION}
     ./autogen.sh
     ./configure --prefix=/usr/local --with-ucx=/usr/local
     make -j$(nproc)
     make install
-    rm -rf /tmp/ucc-${UCC_VERSION}
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/ucc-${UCC_VERSION}
 
     # ================================================================
     # Build PMIx
     # ================================================================
     echo "Building PMIx ${PMIX_VERSION}..."
-    rm -rf /tmp/pmix-${PMIX_VERSION}
-    curl -sL https://github.com/openpmix/openpmix/releases/download/v${PMIX_VERSION}/pmix-${PMIX_VERSION}.tar.bz2 | tar --no-same-owner -xjC /tmp
-    cd /tmp/pmix-${PMIX_VERSION}
-    ./configure --prefix=/usr/local --with-libevent=/usr/local --with-hwloc=/usr/local
+    rm -rf ${WORKDIR}/pmix-${PMIX_VERSION}
+    curl -fsSL https://github.com/openpmix/openpmix/releases/download/v${PMIX_VERSION}/pmix-${PMIX_VERSION}.tar.bz2 | tar --no-same-owner -xjC ${WORKDIR}
+    cd ${WORKDIR}/pmix-${PMIX_VERSION}
+    ./configure --prefix=/usr/local --with-libevent=/usr/local --with-hwloc=/usr/local --with-munge=/usr/local
     make -j$(nproc)
     make install
-    rm -rf /tmp/pmix-${PMIX_VERSION}
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/pmix-${PMIX_VERSION}
 
     # ================================================================
     # Build PRRTE
     # ================================================================
     echo "Building PRRTE ${PRRTE_VERSION}..."
-    rm -rf /tmp/prrte-${PRRTE_VERSION}
-    curl -sL https://github.com/openpmix/prrte/releases/download/v${PRRTE_VERSION}/prrte-${PRRTE_VERSION}.tar.bz2 | tar --no-same-owner -xjC /tmp
-    cd /tmp/prrte-${PRRTE_VERSION}
+    rm -rf ${WORKDIR}/prrte-${PRRTE_VERSION}
+    curl -fsSL https://github.com/openpmix/prrte/releases/download/v${PRRTE_VERSION}/prrte-${PRRTE_VERSION}.tar.bz2 | tar --no-same-owner -xjC ${WORKDIR}
+    cd ${WORKDIR}/prrte-${PRRTE_VERSION}
     ./configure --prefix=/usr/local --with-libevent=/usr/local --with-hwloc=/usr/local --with-pmix=/usr/local
     make -j$(nproc)
     make install
-    rm -rf /tmp/prrte-${PRRTE_VERSION}
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/prrte-${PRRTE_VERSION}
 
     # ================================================================
     # Build OpenMPI
     # ================================================================
+    # ORTE and the verbs/openib BTL no longer exist in Open MPI 5, hence no
+    # --without-orte/--without-verbs. InfiniBand is driven through UCX.
     echo "Building OpenMPI ${OMPI_VERSION}..."
-    rm -rf /tmp/openmpi-${OMPI_VERSION}
-    curl -sL https://download.open-mpi.org/release/open-mpi/v5.0/openmpi-${OMPI_VERSION}.tar.bz2 | tar --no-same-owner -xjC /tmp
-    cd /tmp/openmpi-${OMPI_VERSION}
+    rm -rf ${WORKDIR}/openmpi-${OMPI_VERSION}
+    curl -fsSL https://download.open-mpi.org/release/open-mpi/v${OMPI_VERSION%.*}/openmpi-${OMPI_VERSION}.tar.bz2 | tar --no-same-owner -xjC ${WORKDIR}
+    cd ${WORKDIR}/openmpi-${OMPI_VERSION}
     ./configure --prefix=/usr/local \
         --enable-shared \
-        --without-orte \
         --disable-oshmem \
-        --without-verbs \
         --without-psm2 \
         --with-hwloc=/usr/local \
         --with-libevent=/usr/local \
@@ -270,29 +293,42 @@ PNETCDF_VERSION=1.14.0
         --with-prrte=/usr/local
     make -j$(nproc)
     make install
-    rm -rf /tmp/openmpi-${OMPI_VERSION}
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/openmpi-${OMPI_VERSION}
 
     # ================================================================
     # Build PnetCDF
     # ================================================================
     echo "Building PnetCDF ${PNETCDF_VERSION}..."
-    rm -rf /tmp/pnetcdf-${PNETCDF_VERSION}
-    curl -sL https://parallel-netcdf.github.io/Release/pnetcdf-${PNETCDF_VERSION}.tar.gz | tar --no-same-owner -xzC /tmp
-    cd /tmp/pnetcdf-${PNETCDF_VERSION}
+    rm -rf ${WORKDIR}/pnetcdf-${PNETCDF_VERSION}
+    curl -fsSL https://parallel-netcdf.github.io/Release/pnetcdf-${PNETCDF_VERSION}.tar.gz | tar --no-same-owner -xzC ${WORKDIR}
+    cd ${WORKDIR}/pnetcdf-${PNETCDF_VERSION}
+    # configure pastes the first line of `mpicc --version` (and of mpicxx etc.)
+    # verbatim into the compile command of the pnetcdf_version utility. AOCC's
+    # version string contains a '#' (AOCC_x.y.z-Build#NNN), which make treats
+    # as a comment, leaving an unterminated quote that breaks the build. The
+    # strings are purely informational, so replace them before configure.
+    sed -i -E "s/@MPI[A-Z0-9]+_BASE_VERSION@/AOCC ${AOCC_VERSION}/g" src/utils/pnetcdf_version/Makefile.in
+    # --disable-gio: PnetCDF >= 1.15 builds its GIO library as a subproject
+    # by default but then does not install gio.pc, while pnetcdf.pc still has
+    # "Requires: gio". `pkg-config pnetcdf` then fails and muGrid silently
+    # builds without NetCDF support. muGrid does not use GIO.
     ./configure --prefix=/usr/local \
         --enable-shared \
         --disable-fortran \
+        --disable-gio \
         MPICC=/usr/local/bin/mpicc \
         MPICXX=/usr/local/bin/mpicxx
     make -j$(nproc)
     make install
-    rm -rf /tmp/pnetcdf-${PNETCDF_VERSION}
+    cd ${WORKDIR} && rm -rf ${WORKDIR}/pnetcdf-${PNETCDF_VERSION}
+    # muGrid finds PnetCDF through pkg-config; fail here rather than later
+    pkg-config --modversion pnetcdf
 
     # ================================================================
     # Install Python packages
     # ================================================================
     echo "Installing Python packages..."
-    cd /tmp
+    cd ${WORKDIR}
     pip install --break-system-packages --no-cache-dir \
         numpy \
         scipy \
@@ -310,8 +346,8 @@ PNETCDF_VERSION=1.14.0
     # ================================================================
     echo "Building muGrid ${MUGRID_VERSION}..."
 
-    export MUGRID_SRC_DIR=/tmp/mugrid
-    export MUGRID_BUILD_DIR=/tmp/mugrid-build
+    export MUGRID_SRC_DIR=${WORKDIR}/mugrid
+    export MUGRID_BUILD_DIR=${WORKDIR}/mugrid-build
 
     rm -rf ${MUGRID_SRC_DIR} ${MUGRID_BUILD_DIR}
     git clone --recurse-submodules -b ${MUGRID_VERSION} \
@@ -356,7 +392,7 @@ PNETCDF_VERSION=1.14.0
     python3 -c "import muGrid; assert muGrid.has_mpi, 'MPI support is missing'"
     python3 -c "import muGrid; assert muGrid.has_netcdf, 'NetCDF I/O is missing'"
 
-    rm -rf ${MUGRID_SRC_DIR} ${MUGRID_BUILD_DIR}
+    cd / && rm -rf ${WORKDIR}
 
     # ================================================================
     # Prepare staging area with only runtime files
@@ -364,75 +400,81 @@ PNETCDF_VERSION=1.14.0
     echo "Preparing staging area..."
     mkdir -p /staging/usr/local/lib
     mkdir -p /staging/usr/local/bin
+    mkdir -p /staging/usr/local/include
     mkdir -p /staging/usr/local/share
-    mkdir -p /staging/usr/lib
     mkdir -p /staging/etc
 
     # -------------------------------
     # Copy all shared libraries from /usr/local/lib
     # -------------------------------
-    find /usr/local/lib -name "*.so*" -type f -exec cp -a {} /staging/usr/local/lib/ \;
-    find /usr/local/lib -name "*.so*" -type l -exec cp -a {} /staging/usr/local/lib/ \;
+    # Top level only: the plugin directories are copied as a whole below, and
+    # the Python extension modules come with the python3* directory.
+    find /usr/local/lib -maxdepth 1 -name "*.so*" -type f -exec cp -a {} /staging/usr/local/lib/ \;
+    find /usr/local/lib -maxdepth 1 -name "*.so*" -type l -exec cp -a {} /staging/usr/local/lib/ \;
 
-    # Copy plugin directories (UCX, UCC, OpenMPI, PMIx)
+    # Copy plugin directories (UCX, UCC, OpenMPI, PMIx, PRRTE, libfabric)
     cp -a /usr/local/lib/ucx /staging/usr/local/lib/ 2>/dev/null || true
     cp -a /usr/local/lib/ucc /staging/usr/local/lib/ 2>/dev/null || true
     cp -a /usr/local/lib/openmpi /staging/usr/local/lib/ 2>/dev/null || true
     cp -a /usr/local/lib/pmix /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /usr/local/lib/prte /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /usr/local/lib/libfabric /staging/usr/local/lib/ 2>/dev/null || true
 
     # AOCC runtime libraries (compiler runtimes)
     cp -a /opt/AMD/aocc-compiler-*/lib/libflang*.so* /staging/usr/local/lib/ 2>/dev/null || true
     cp -a /opt/AMD/aocc-compiler-*/lib/libFortran*.so* /staging/usr/local/lib/ 2>/dev/null || true
-    cp -a /opt/AMD/aocc-compiler-*/lib/libomp*.so* /staging/usr/local/lib/ 2>/dev/null || true
+    # Not libomp*: that also matches the libomptarget* offload plugins, which
+    # need LLVM/ROCm libraries that are not in the runtime image. libompstub is
+    # needed by the Fortran MPI bindings.
+    cp -a /opt/AMD/aocc-compiler-*/lib/libomp.so* /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /opt/AMD/aocc-compiler-*/lib/libompstub.so* /staging/usr/local/lib/ 2>/dev/null || true
     cp -a /opt/AMD/aocc-compiler-*/lib/libamdlibm*.so* /staging/usr/local/lib/ 2>/dev/null || true
     cp -a /opt/AMD/aocc-compiler-*/lib/libpgmath*.so* /staging/usr/local/lib/ 2>/dev/null || true
 
     # Python packages
     cp -a /usr/local/lib/python3* /staging/usr/local/lib/
 
-    # MPI binaries
+    # MPI binaries. In Open MPI 5 mpirun/mpiexec are symlinks to PRRTE's
+    # prterun, so the PRRTE launcher and daemon must be copied as well.
     cp -a /usr/local/bin/mpirun /staging/usr/local/bin/ 2>/dev/null || true
     cp -a /usr/local/bin/mpiexec /staging/usr/local/bin/ 2>/dev/null || true
-    cp -a /usr/local/bin/orte* /staging/usr/local/bin/ 2>/dev/null || true
+    cp -a /usr/local/bin/prte* /staging/usr/local/bin/ 2>/dev/null || true
     cp -a /usr/local/bin/ompi* /staging/usr/local/bin/ 2>/dev/null || true
+    cp -a /usr/local/bin/pmix_info /staging/usr/local/bin/ 2>/dev/null || true
+    cp -a /usr/local/bin/ucx_info /staging/usr/local/bin/ 2>/dev/null || true
+    cp -a /usr/local/bin/ucc_info /staging/usr/local/bin/ 2>/dev/null || true
+    cp -a /usr/local/bin/fi_info /staging/usr/local/bin/ 2>/dev/null || true
 
-    # MPI/HPC data files
+    # MPI/HPC data files (help messages, MCA parameter defaults)
     cp -a /usr/local/share/openmpi /staging/usr/local/share/ 2>/dev/null || true
     cp -a /usr/local/share/pmix /staging/usr/local/share/ 2>/dev/null || true
+    cp -a /usr/local/share/prte /staging/usr/local/share/ 2>/dev/null || true
     cp -a /usr/local/share/hwloc /staging/usr/local/share/ 2>/dev/null || true
+    cp -a /usr/local/etc /staging/usr/local/ 2>/dev/null || true
 
-    # CMake config for downstream builds (optional)
+    # C++ development files for downstream builds (muGrid is a static library)
+    cp -a /usr/local/lib/libmuGrid.a /staging/usr/local/lib/ 2>/dev/null || true
+    cp -a /usr/local/include/libmugrid /staging/usr/local/include/ 2>/dev/null || true
     mkdir -p /staging/usr/local/lib/cmake
     cp -a /usr/local/lib/cmake/muGrid /staging/usr/local/lib/cmake/ 2>/dev/null || true
 
-    # -------------------------------
-    # System runtime libraries
-    # -------------------------------
-    # Boost test runtime
-    cp -a /usr/lib/x86_64-linux-gnu/libboost_unit_test_framework*.so* /staging/usr/lib/ 2>/dev/null || true
-    # OpenMP runtime
-    cp -a /usr/lib/x86_64-linux-gnu/libgomp*.so* /staging/usr/lib/ 2>/dev/null || true
-    # Fortran runtime
-    cp -a /usr/lib/x86_64-linux-gnu/libgfortran*.so* /staging/usr/lib/ 2>/dev/null || true
-    cp -a /usr/lib/x86_64-linux-gnu/libquadmath*.so* /staging/usr/lib/ 2>/dev/null || true
-    # GCC atomic operations
-    cp -a /usr/lib/x86_64-linux-gnu/libatomic*.so* /staging/usr/lib/ 2>/dev/null || true
-    # InfiniBand/RDMA
-    cp -a /usr/lib/x86_64-linux-gnu/libibverbs*.so* /staging/usr/lib/ 2>/dev/null || true
-    cp -a /usr/lib/x86_64-linux-gnu/librdmacm*.so* /staging/usr/lib/ 2>/dev/null || true
-    cp -a /usr/lib/x86_64-linux-gnu/libnl*.so* /staging/usr/lib/ 2>/dev/null || true
-    # NUMA
-    cp -a /usr/lib/x86_64-linux-gnu/libnuma*.so* /staging/usr/lib/ 2>/dev/null || true
-    # Other dependencies
-    cp -a /usr/lib/x86_64-linux-gnu/libltdl*.so* /staging/usr/lib/ 2>/dev/null || true
-    cp -a /usr/lib/x86_64-linux-gnu/libxml2*.so* /staging/usr/lib/ 2>/dev/null || true
+    # System runtime libraries (InfiniBand, NUMA, Fortran, ...) are installed
+    # from the Ubuntu archive in the runtime stage.
 
     # -------------------------------
     # Build info
     # -------------------------------
     cat > /staging/etc/mugrid-build-info << EOF
 MUGRID_VERSION=${MUGRID_VERSION}
+AOCC_VERSION=${AOCC_VERSION}
 OMPI_VERSION=${OMPI_VERSION}
+PMIX_VERSION=${PMIX_VERSION}
+PRRTE_VERSION=${PRRTE_VERSION}
+UCX_VERSION=${UCX_VERSION}
+UCC_VERSION=${UCC_VERSION}
+LIBFABRIC_VERSION=${LIBFABRIC_VERSION}
+HWLOC_VERSION=${HWLOC_VERSION}
+MPI4PY_VERSION=${MPI4PY_VERSION}
 PNETCDF_VERSION=${PNETCDF_VERSION}
 BUILD_DATE=$(date -Iseconds)
 TARGET_ARCH=znver3
@@ -454,11 +496,10 @@ From: ubuntu:24.04
 Stage: runtime
 
 %arguments
-MUGRID_VERSION=1.0.0
+MUGRID_VERSION=1.4.0
 
 %files from build
     /staging/usr/local/ /usr/local
-    /staging/usr/lib/ /usr/lib
     /staging/etc/mugrid-build-info /etc/mugrid-build-info
 
 %post
@@ -467,6 +508,11 @@ MUGRID_VERSION=1.0.0
     # ================================================================
     # Install only essential runtime packages
     # ================================================================
+    # Some archive.ubuntu.com mirror addresses are occasionally unreachable;
+    # time out and retry instead of hanging the build indefinitely.
+    printf 'Acquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries "5";\n' \
+        > /etc/apt/apt.conf.d/99-timeouts
+
     apt-get update
     apt-get install -y --no-install-recommends \
         python3 \
@@ -477,8 +523,13 @@ MUGRID_VERSION=1.0.0
         zlib1g \
         liblzma5 \
         libffi8 \
+        libatomic1 \
+        libgomp1 \
         libgfortran5 \
+        libquadmath0 \
         libnuma1 \
+        libibverbs1 \
+        librdmacm1t64 \
         ibverbs-providers \
         ca-certificates
 
@@ -506,20 +557,19 @@ MUGRID_VERSION=1.0.0
     # ================================================================
     cat > /etc/ld.so.conf.d/mugrid.conf << 'EOF'
 /usr/local/lib
-/usr/local/lib/openmpi
-/usr/lib
 EOF
 
     ldconfig
 
 %environment
     export PATH=/usr/local/bin:$PATH
-    export LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib/openmpi:$LD_LIBRARY_PATH
-    export PYTHONPATH=/usr/local/lib/python3.12/dist-packages:$PYTHONPATH
+    export LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+    export PYTHONPATH=/usr/local/lib/python3.12/dist-packages${PYTHONPATH:+:$PYTHONPATH}
     export OPAL_PREFIX=/usr/local
     export LC_ALL=C
     export PYTHONUNBUFFERED=1
-    export PYTHONUSERSITE=1
+    # Don't load modules from $HOME/.local (which is bind-mounted from the host)
+    export PYTHONNOUSERSITE=1
 
 %runscript
     exec python3 "$@"
@@ -527,7 +577,12 @@ EOF
 %test
     python3 -c "import numpy; print('NumPy:', numpy.__version__)"
     python3 -c "import scipy; print('SciPy:', scipy.__version__)"
+    python3 -c "import mpi4py; print('mpi4py:', mpi4py.__version__)"
     python3 -c "import muGrid; print('muGrid:', muGrid.__version__)"
+    python3 -c "import muGrid; print(muGrid.version_string())"
+    python3 -c "import muGrid; assert muGrid.has_mpi, 'MPI support is missing'"
+    python3 -c "import muGrid; assert muGrid.netcdf_backend == 'PnetCDF', muGrid.netcdf_backend"
+    ompi_info --version
 
 %help
     muGrid - Grid-based Simulation Library for NEMO2
@@ -539,7 +594,7 @@ EOF
     Build info: /etc/mugrid-build-info
 
     Features:
-      - OpenMPI 5.0.7 with UCX transport
+      - OpenMPI 5.0 with UCX transport (see build info for exact versions)
       - PnetCDF for parallel I/O
       - NuMPI for parallel algorithms
       - pocketfft (bundled with muGrid) for FFTs
