@@ -1,0 +1,152 @@
+Bootstrap: localimage
+From: mpibase-cuda.sif
+
+%help
+
+    LAMMPS (stable_29Aug2024_update2) mit KOKKOS/CUDA fuer NVIDIA H200
+    (Hopper, sm_90) und AMD EPYC 9654 (Zen 4) auf NEMO2.
+
+    Pakete: KSPACE, MANYBODY, DPD-BASIC, DPD-MESO, MISC, ML-PACE, MANIFOLD,
+    MOLECULE, MOLFILE, NETCDF, OPT, RIGID, VORONOI, EXTRA-COMPUTE, JPEG, PNG
+    plus KOKKOS (CUDA + OpenMP) und die Fixes contact/sphere und
+    contact/sphere/93.
+
+    Beispiel Jobskript (1 GPU pro MPI-Rank):
+
+      export OMP_NUM_THREADS=1
+      srun --gpus-per-task=1 apptainer exec --nv lammps.sif \
+          lmp -k on g 1 -sf kk -pk kokkos gpu/aware on -in in.file
+
+    Hinweise:
+      * --nv ist Pflicht, sonst sieht der Container keine GPU.
+      * Kein MPI-Modul auf dem Host laden (Slurm/PMIx uebernimmt).
+      * Pro Rank genau eine GPU: "-k on g 1".
+      * Nur Styles mit /kk-Variante laufen auf der GPU. Die contact_sphere-
+        Fixes und viele weitere Pakete (z.B. DPD-MESO, ML-PACE) laufen auf
+        der CPU.
+
+%post
+
+    export DEBIAN_FRONTEND=noninteractive
+    export DEBCONF_NONINTERACTIVE_SEEN=true
+
+    # CUDA-Umgebung fuer den Build (%environment gilt hier nicht)
+    export CUDA_HOME=/usr/local/cuda
+    export CUDA_LIB=$CUDA_HOME/targets/x86_64-linux/lib
+    export CUDA_STUBS=$CUDA_LIB/stubs
+    export PATH=/usr/local/bin:$CUDA_HOME/bin:$PATH
+    export LD_LIBRARY_PATH=/usr/local/lib:$CUDA_LIB:$LD_LIBRARY_PATH
+    # Stub-libcuda nur zum Linken, nicht zur Laufzeit
+    export LIBRARY_PATH=$CUDA_LIB:$CUDA_STUBS:$LIBRARY_PATH
+
+    # Build-Parallelitaet (nvcc ist speicherhungrig -> bei OOM verringern)
+    export NJOBS=4
+
+    # Die Apt-Listen wurden im Base-Image geloescht -> update noetig
+    apt-get update
+    apt-get install -y cmake ninja-build libblas-dev liblapack-dev \
+        libfftw3-dev libcurl4-openssl-dev zlib1g-dev libnetcdf-dev \
+        libjpeg-dev libpng-dev libcufft-dev-12-6
+
+    # Paths
+    BUILDDIR=/tmp
+    PREFIX=/usr/local
+
+    export CONTAINER_LAMMPS_VERSION=stable_29Aug2024_update2
+
+    # Install LAMMPS
+    rm -rf ${BUILDDIR}/lammps
+    git clone -b ${CONTAINER_LAMMPS_VERSION} https://github.com/lammps/lammps.git ${BUILDDIR}/lammps
+
+    # Add fixes. WICHTIG: vor dem cmake-Aufruf, denn CMake sammelt die
+    # Quelldateien in src/ beim Konfigurieren ein (-f: Abbruch bei HTTP-Fehler).
+    curl -fL -o ${BUILDDIR}/lammps/src/fix_contact_sphere.cpp https://raw.githubusercontent.com/Atomistica/user-gfmd/master/src/extras/fix_contact_sphere.cpp
+    curl -fL -o ${BUILDDIR}/lammps/src/fix_contact_sphere.h https://raw.githubusercontent.com/Atomistica/user-gfmd/master/src/extras/fix_contact_sphere.h
+    curl -fL -o ${BUILDDIR}/lammps/src/fix_contact_sphere_93.cpp https://raw.githubusercontent.com/Holschuh/LAMMPS-files/refs/heads/main/fix_contact_sphere_93.cpp
+    curl -fL -o ${BUILDDIR}/lammps/src/fix_contact_sphere_93.h https://raw.githubusercontent.com/Holschuh/LAMMPS-files/refs/heads/main/fix_contact_sphere_93.h
+
+    # API-Anpassung: fix_contact_sphere_93 ruft minimum_image(Datei, Zeile, delta)
+    # bzw. minimum_image(FLERR, delta) auf (neues LAMMPS-API). Der Tag
+    # stable_29Aug2024 kennt nur minimum_image(delta) -> die ersten Argumente
+    # entfernen.
+    sed -i -E 's/minimum_image\((FLERR|"[^"]*", *[0-9]+), *\s*/minimum_image(/g' \
+        ${BUILDDIR}/lammps/src/fix_contact_sphere_93.cpp
+    grep -n "minimum_image" ${BUILDDIR}/lammps/src/fix_contact_sphere_93.cpp
+
+    # nvcc_wrapper (aus Kokkos) nutzt g++ als Host-Compiler
+    export NVCC_WRAPPER_DEFAULT_COMPILER=g++
+    export OMPI_CXX=g++
+
+    # voro++ separat mit g++ bauen: LAMMPS wuerde es sonst mit nvcc_wrapper
+    # bauen, und dessen "-MM" (Abhaengigkeitsdateien) funktioniert nicht.
+    rm -rf ${BUILDDIR}/voro++-0.4.6
+    curl -fL https://download.lammps.org/thirdparty/voro++-0.4.6.tar.gz | tar -xzC ${BUILDDIR}
+    cd ${BUILDDIR}/voro++-0.4.6
+    make -j ${NJOBS} CXX=g++ CFLAGS="-O3 -fPIC"
+    make install PREFIX=${PREFIX}
+    ls -l ${PREFIX}/lib/libvoro++.a ${PREFIX}/include/voro++/voro++.hh
+
+    rm -rf ${BUILDDIR}/lammps-build
+    mkdir ${BUILDDIR}/lammps-build
+    cd ${BUILDDIR}/lammps-build
+    cmake -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=${PREFIX} \
+        -DCMAKE_CXX_COMPILER=${BUILDDIR}/lammps/lib/kokkos/bin/nvcc_wrapper \
+        -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG" \
+        -DBUILD_MPI=on \
+        -DBUILD_OMP=on \
+        -DPKG_KSPACE=on \
+        -DPKG_MANYBODY=on \
+        -DPKG_DPD-BASIC=on \
+        -DPKG_DPD-MESO=on \
+        -DPKG_MISC=on \
+        -DPKG_ML-PACE=on \
+        -DPKG_MANIFOLD=on \
+        -DPKG_MOLECULE=on \
+        -DPKG_MOLFILE=on \
+        -DPKG_NETCDF=on \
+        -DPKG_OPT=on \
+        -DPKG_RIGID=on \
+        -DPKG_VORONOI=on \
+        -DDOWNLOAD_VORO=no \
+        -DVORO_LIBRARY=${PREFIX}/lib/libvoro++.a \
+        -DVORO_INCLUDE_DIR=${PREFIX}/include/voro++ \
+        -DPKG_EXTRA-COMPUTE=on \
+        -DWITH_JPEG=on \
+        -DWITH_PNG=on \
+        -DPKG_KOKKOS=on \
+        -DKokkos_ENABLE_CUDA=on \
+        -DKokkos_ENABLE_OPENMP=on \
+        -DKokkos_ARCH_HOPPER90=on \
+        -DKokkos_ARCH_ZEN4=on \
+        -DFFT=FFTW3 \
+        -DFFT_KOKKOS=CUFFT \
+        ${BUILDDIR}/lammps/cmake
+
+    # make
+    cmake --build . -j ${NJOBS}
+    cmake --install .
+
+    # Aufraeumen
+    cd /
+    rm -rf ${BUILDDIR}/lammps ${BUILDDIR}/lammps-build ${BUILDDIR}/voro++-0.4.6
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+%environment
+
+    export PATH=/usr/local/bin:/usr/local/cuda/bin:$PATH
+    export LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+    # CUDA-aware MPI ueber UCX
+    export OMPI_MCA_pml=ucx
+
+%runscript
+
+    /usr/local/bin/lmp "$@"
+
+%test
+
+    /usr/local/bin/lmp -h | grep -i -E "kokkos|cuda" || true
+    /usr/local/bin/lmp -h | grep -i "contact/sphere" || echo "WARNUNG: contact/sphere nicht in lmp -h gelistet"
